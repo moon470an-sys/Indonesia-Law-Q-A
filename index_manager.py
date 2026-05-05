@@ -1,0 +1,220 @@
+"""
+인도네시아 법령 인덱싱 - 공통 모듈
+
+manifest.json 기반 증분 처리:
+- 파일 SHA-256 + size + mtime 추적
+- 카테고리(폴더)별 ChromaDB 컬렉션 사용
+- 신규/변경 파일만 처리, 삭제된 파일의 청크는 제거
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+from dataclasses import dataclass, field, asdict
+from pathlib import Path
+from typing import Iterable, Iterator
+
+# C 디스크 절약: 모델/캐시 D 드라이브로
+_DEFAULT_CACHE = Path(os.getenv("RAG_MODEL_CACHE", r"D:\hf_cache"))
+_DEFAULT_CACHE.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("HF_HOME", str(_DEFAULT_CACHE))
+os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(_DEFAULT_CACHE / "hub"))
+os.environ.setdefault("TRANSFORMERS_CACHE", str(_DEFAULT_CACHE / "transformers"))
+os.environ.setdefault("SENTENCE_TRANSFORMERS_HOME", str(_DEFAULT_CACHE / "sentence_transformers"))
+os.environ.setdefault("TORCH_HOME", str(_DEFAULT_CACHE / "torch"))
+
+
+SOURCE_ROOT = Path(os.getenv("RAG_SOURCE_ROOT", r"D:\인도네시아 법령 원문"))
+CHROMA_DIR = Path(os.getenv("RAG_CHROMA_DIR", r"D:\rag_data\chroma_db"))
+MANIFEST_PATH = Path(os.getenv("RAG_MANIFEST_PATH", r"D:\rag_data\manifest.json"))
+
+# 폴더명 → 컬렉션명 매핑 (한글 부분이 없으면 latin 부분 그대로)
+_CATEGORY_OVERRIDES = {
+    "헌법": "constitution",
+}
+
+
+def normalize_category(folder_name: str) -> str:
+    """폴더명을 ChromaDB 컬렉션명으로 정규화한다."""
+    if folder_name in _CATEGORY_OVERRIDES:
+        slug = _CATEGORY_OVERRIDES[folder_name]
+    elif "_" in folder_name:
+        # "법률_UU" → "uu"
+        slug = folder_name.split("_", 1)[1]
+    else:
+        slug = folder_name
+    slug = re.sub(r"[^A-Za-z0-9_]", "_", slug).strip("_").lower()
+    return f"indonesia_{slug}"
+
+
+def discover_pdfs(root: Path = SOURCE_ROOT) -> Iterator[tuple[str, Path]]:
+    """루트 아래 1단계 카테고리 폴더의 PDF를 (folder_name, path)로 반환."""
+    if not root.exists():
+        return
+    for entry in sorted(root.iterdir()):
+        if not entry.is_dir():
+            continue
+        if entry.name.startswith(("."  , "__")):
+            continue
+        for pdf in entry.rglob("*.pdf"):
+            yield entry.name, pdf
+
+
+@dataclass
+class FileEntry:
+    path: str               # 절대경로 (key)
+    category: str           # 폴더명 (e.g., "법률_UU")
+    collection: str         # 컬렉션명 (e.g., "indonesia_uu")
+    sha256: str
+    size: int
+    mtime: float
+    chunk_ids: list[str] = field(default_factory=list)
+    chunk_count: int = 0
+    indexed_at: str = ""    # ISO 8601
+
+
+class Manifest:
+    """파일 → FileEntry 매핑. 디스크에 JSON으로 영속."""
+
+    def __init__(self, path: Path = MANIFEST_PATH):
+        self.path = path
+        self.entries: dict[str, FileEntry] = {}
+        self._load()
+
+    def _load(self) -> None:
+        if not self.path.exists():
+            return
+        try:
+            with self.path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return
+        for k, v in (data or {}).items():
+            try:
+                self.entries[k] = FileEntry(**v)
+            except TypeError:
+                # 스키마 미스매치 → 무시 (다음 인덱싱 때 갱신됨)
+                continue
+
+    def save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
+        with tmp.open("w", encoding="utf-8") as f:
+            json.dump(
+                {k: asdict(v) for k, v in self.entries.items()},
+                f, ensure_ascii=False, indent=0
+            )
+        tmp.replace(self.path)
+
+    def needs_index(self, path: Path, sha: str, size: int, mtime: float) -> bool:
+        e = self.entries.get(str(path))
+        if not e:
+            return True
+        return e.sha256 != sha or e.size != size
+
+    def upsert(self, entry: FileEntry) -> None:
+        self.entries[entry.path] = entry
+
+    def delete(self, path: str) -> FileEntry | None:
+        return self.entries.pop(path, None)
+
+    def all_paths(self) -> set[str]:
+        return set(self.entries.keys())
+
+
+def hash_file(path: Path, chunk_size: int = 1 << 20) -> tuple[str, int, float]:
+    """SHA-256, size, mtime 한 번에."""
+    h = hashlib.sha256()
+    size = 0
+    with path.open("rb") as f:
+        while True:
+            data = f.read(chunk_size)
+            if not data:
+                break
+            h.update(data)
+            size += len(data)
+    return h.hexdigest(), size, path.stat().st_mtime
+
+
+# ============= PDF 파싱 / 청킹 (워커 프로세스에서 호출) =============
+import pdfplumber  # noqa: E402
+
+
+CHUNK_SIZE = 700
+CHUNK_OVERLAP = 120
+ARTICLE_PATTERN = re.compile(
+    r"(Pasal\s+\d+[A-Za-z]?|Bab\s+[IVXLCDM]+|Pembukaan)",
+    re.IGNORECASE,
+)
+
+
+def _detect_article(text: str) -> str:
+    m = ARTICLE_PATTERN.search(text)
+    return m.group(0).strip() if m else ""
+
+
+def _chunk_text(text: str) -> Iterable[str]:
+    text = (text or "").strip()
+    if not text:
+        return
+    if len(text) <= CHUNK_SIZE:
+        yield text
+        return
+    n = len(text)
+    start = 0
+    while start < n:
+        end = min(start + CHUNK_SIZE, n)
+        if end < n:
+            window = text[start:end]
+            split_at = max(window.rfind("\n"), window.rfind(". "), window.rfind("。"))
+            if split_at > CHUNK_SIZE * 0.5:
+                end = start + split_at + 1
+        yield text[start:end].strip()
+        if end >= n:
+            break
+        start = max(end - CHUNK_OVERLAP, start + 1)
+
+
+def parse_pdf(pdf_path: Path) -> list[dict]:
+    """PDF 파일 → 청크 리스트. 워커 프로세스에서 호출."""
+    chunks: list[dict] = []
+    try:
+        with pdfplumber.open(str(pdf_path)) as pdf:
+            for page_num, page in enumerate(pdf.pages, start=1):
+                text = page.extract_text() or ""
+                text = re.sub(r"[ \t]+", " ", text)
+                text = re.sub(r"\n{2,}", "\n", text).strip()
+                if not text:
+                    continue
+                for piece in _chunk_text(text):
+                    if not piece:
+                        continue
+                    chunks.append({
+                        "text": piece,
+                        "source": pdf_path.name,
+                        "page": page_num,
+                        "article": _detect_article(piece),
+                    })
+    except Exception as exc:
+        return [{"_error": f"{type(exc).__name__}: {exc}"}]
+    return chunks
+
+
+def make_chunk_id(pdf_path: Path, page: int, idx: int) -> str:
+    """파일 경로 해시(8자) + 페이지 + 인덱스로 안정 ID 생성.
+    동일 파일 동일 위치는 동일 ID → upsert 가능.
+    """
+    h = hashlib.sha1(str(pdf_path).encode("utf-8")).hexdigest()[:10]
+    return f"{h}-p{page}-{idx}"
+
+
+def parse_pdf_worker(pdf_path_str: str) -> dict:
+    """ProcessPoolExecutor용 wrapper. 직렬화 가능한 dict 반환."""
+    pdf_path = Path(pdf_path_str)
+    chunks = parse_pdf(pdf_path)
+    return {
+        "path": pdf_path_str,
+        "chunks": chunks,
+    }

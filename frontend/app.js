@@ -100,10 +100,13 @@ function renderItem(q, a, sources) {
     .map((s, i) => {
       const article = s.article || "조항 미확인";
       const score = (s.score || 0).toFixed(3);
+      const cat = s.category || "";
+      const catHtml = cat ? `<span class="src-cat">${escapeHtml(cat)}</span>` : "";
       return `
         <li>
           <div class="src-meta">
             <span class="src-idx">[${i + 1}]</span>
+            ${catHtml}
             <span class="src-name">${escapeHtml(s.source)}</span>
             <span class="src-page">p.${s.page}</span>
             <span class="src-article">${escapeHtml(article)}</span>

@@ -209,7 +209,57 @@ GitHub Pages JS  ←  답변 본문 + 인용 조항(Pasal 6A 등) 표시
 
 ---
 
-## 8. 다음 단계 (확장 시)
+## 8. 부팅/로그온 시 자동 시작 (Windows Task Scheduler)
+
+PC를 켜면 백엔드와 터널이 자동으로 뜨고, 데스크톱 바로가기 클릭 한 번으로 페이지가 백엔드 URL이 채워진 채 열리도록 만듭니다.
+
+### 등록 (1회만)
+
+PowerShell에서:
+```powershell
+cd "C:\Users\yoonseok.moon\OneDrive - (주) ST International\Projects\인도네시아 법령 RAG"
+.\auto_start\register_task.ps1
+```
+
+### 즉시 1회 테스트
+
+```powershell
+Start-ScheduledTask -TaskName "Indonesia Law RAG"
+# 약 30초~2분 뒤 데스크톱에 "인도네시아 헌법 Q&A.url" 바로가기가 생기거나 갱신됩니다
+Get-Content "logs\start.log" -Tail 20
+```
+
+### 동작 흐름
+
+1. 로그온 → 30초 지연 후 `start_rag.ps1` 실행 (창 안 보임)
+2. `uvicorn` 기동 → `/health` 정상 확인
+3. `cloudflared tunnel --url http://127.0.0.1:8000` 기동 → 터널 URL 추출
+4. `logs/` 폴더에 모든 stdout/err 기록
+5. 데스크톱에 `인도네시아 헌법 Q&A.url` 바로가기를 새 URL로 갱신
+6. 사용자: 바로가기 클릭 → `?api=...` 파라미터로 백엔드 URL 자동 입력 → 토큰 1회 입력하면 끝
+
+### 중지 / 해제
+
+```powershell
+# 임시 중지 (프로세스만 종료, 다음 로그온 시 다시 시작됨)
+.\auto_start\stop_rag.ps1
+
+# 자동 시작 완전 해제
+.\auto_start\unregister_task.ps1
+```
+
+### 로그 위치
+
+| 파일 | 내용 |
+|---|---|
+| `logs\start.log` | 자동 시작 스크립트 자체 로그 |
+| `logs\uvicorn.log` / `.err` | FastAPI 서버 출력 |
+| `logs\cloudflared.log` / `.err` | 터널 출력 (URL은 .err 파일에 있음) |
+| `.tunnel_url` | 가장 최근 터널 URL (디버깅용) |
+
+---
+
+## 9. 다음 단계 (확장 시)
 
 - 헌법 외 다른 법령(UU/PP/Perpres) 폴더 추가 → `RAG_SOURCE_DIR` 환경변수만 바꿔서 `ingest.py` 재실행
 - 컬렉션을 법령 종류별로 분리 (`indonesia_constitution`, `indonesia_uu`, …)

@@ -21,6 +21,16 @@ const els = {
 
 function loadSettings() {
   const cfg = window.APP_CONFIG || {};
+
+  // 데스크톱 바로가기에서 ?api=https://...trycloudflare.com 으로 들어왔으면 우선 적용
+  const params = new URLSearchParams(location.search);
+  const urlFromQuery = params.get("api");
+  if (urlFromQuery) {
+    localStorage.setItem(LS_KEYS.url, urlFromQuery);
+    // URL 깔끔하게 — 쿼리 제거 후 history 교체 (토큰은 절대 URL에 들어가지 않음)
+    history.replaceState(null, "", location.pathname);
+  }
+
   els.apiUrl.value = localStorage.getItem(LS_KEYS.url) || cfg.defaultApiUrl || "";
   els.apiToken.value = localStorage.getItem(LS_KEYS.token) || "";
   els.topK.value = localStorage.getItem(LS_KEYS.topK) || cfg.defaultTopK || 5;

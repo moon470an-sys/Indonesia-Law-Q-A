@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>인도네시아 헌법 Q&amp;A</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>📜 인도네시아 헌법 Q&amp;A</h1>
+    <div class="status" id="status">백엔드 상태 확인 중…</div>
+  </header>
+
+  <main>
+    <section class="settings">
+      <details>
+        <summary>⚙️ 백엔드 연결 설정</summary>
+        <div class="settings-body">
+          <label>
+            백엔드 URL (Cloudflare Tunnel 주소)
+            <input type="text" id="apiUrl" placeholder="https://your-tunnel.trycloudflare.com" />
+          </label>
+          <label>
+            클라이언트 토큰 (서버의 CLIENT_API_TOKEN과 동일)
+            <input type="password" id="apiToken" placeholder="비워두면 인증 없음" />
+          </label>
+          <label>
+            Top-K (검색할 문서 청크 수)
+            <input type="number" id="topK" min="1" max="15" value="5" />
+          </label>
+          <div class="row">
+            <button id="saveBtn" class="secondary">설정 저장</button>
+            <button id="healthBtn" class="secondary">연결 테스트</button>
+          </div>
+          <p class="hint">
+            * 토큰과 URL은 브라우저 localStorage에만 저장됩니다 (서버/저장소 전송 없음).
+          </p>
+        </div>
+      </details>
+    </section>
+
+    <section class="examples">
+      <span class="label">예시 질문</span>
+      <button class="chip" data-q="인도네시아 헌법에서 대통령의 권한은 무엇인가?">대통령 권한</button>
+      <button class="chip" data-q="인도네시아 국민의 기본권은 어떻게 규정되어 있는가?">국민 기본권</button>
+      <button class="chip" data-q="인도네시아 의회(MPR, DPR, DPD)의 구성은?">의회 구성</button>
+      <button class="chip" data-q="인도네시아 헌법 개정 절차는 어떻게 되는가?">헌법 개정 절차</button>
+    </section>
+
+    <section class="ask">
+      <textarea id="question" rows="3" placeholder="인도네시아 헌법에 관해 질문하세요…"></textarea>
+      <div class="row">
+        <button id="askBtn" class="primary">질문하기</button>
+        <button id="clearBtn" class="secondary">대화 초기화</button>
+      </div>
+    </section>
+
+    <section id="history" class="history"></section>
+  </main>
+
+  <footer>
+    <small>
+      백엔드: 로컬 PC FastAPI · 벡터DB: ChromaDB · LLM: Anthropic Claude ·
+      답변은 제공된 헌법 원문을 근거로 생성됩니다.
+    </small>
+  </footer>
+
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

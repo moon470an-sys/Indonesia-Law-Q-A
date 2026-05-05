@@ -1,0 +1,30 @@
+# 환경변수 / 비밀
+.env
+.env.local
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# 벡터/캐시 (로컬에만 존재)
+chroma_db/
+data/chroma_db/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Cloudflare 터널 자격증명
+cloudflared/
+*.json
+!frontend/**/*.json

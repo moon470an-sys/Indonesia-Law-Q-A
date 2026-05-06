@@ -101,5 +101,25 @@ $content = "[InternetShortcut]`r`nURL=$PageBase" + "?api=$encoded`r`n"
 [System.IO.File]::WriteAllText($shortcutPath, $content, [System.Text.Encoding]::ASCII)
 
 Write-Log "shortcut updated: $shortcutPath"
+
+# 7) ingest 자동 재개 (manifest 기반 증분이라 재실행 안전)
+try {
+    $env:PYTHONUTF8 = "1"
+    $env:PYTHONIOENCODING = "utf-8"
+    $env:RAG_PARSE_WORKERS = "6"
+    $env:RAG_EMBED_BATCH = "128"
+    $env:RAG_PARSE_TIMEOUT = "120"
+    $env:RAG_UPSERT_FLUSH_CHUNKS = "2048"
+    $ingestProc = Start-Process -FilePath $Python `
+        -ArgumentList "-X", "utf8", "ingest_loop.py", "--duration", "999h", "--interval", "60s" `
+        -WorkingDirectory $Project -WindowStyle Hidden `
+        -RedirectStandardOutput (Join-Path $LogDir "ingest_resume.log") `
+        -RedirectStandardError (Join-Path $LogDir "ingest_resume.err") `
+        -PassThru
+    Write-Log "ingest auto-resumed pid=$($ingestProc.Id)"
+} catch {
+    Write-Log "ingest resume failed: $_"
+}
+
 Write-Log "=== done ==="
 exit 0

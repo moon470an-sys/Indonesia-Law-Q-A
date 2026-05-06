@@ -139,11 +139,14 @@ def hash_file(path: Path, chunk_size: int = 1 << 20) -> tuple[str, int, float]:
 
 
 # ============= PDF 파싱 / 청킹 (워커 프로세스에서 호출) =============
+# pypdf을 1차로 사용하고(빠름), 텍스트가 거의 안 나올 때만 pdfplumber로 fallback(정확).
+import pypdf  # noqa: E402
 import pdfplumber  # noqa: E402
 
 
 CHUNK_SIZE = 700
 CHUNK_OVERLAP = 120
+MIN_TEXT_FALLBACK = 50  # 페이지당 텍스트가 이 이하면 pdfplumber 재시도
 ARTICLE_PATTERN = re.compile(
     r"(Pasal\s+\d+[A-Za-z]?|Bab\s+[IVXLCDM]+|Pembukaan)",
     re.IGNORECASE,
@@ -177,28 +180,65 @@ def _chunk_text(text: str) -> Iterable[str]:
         start = max(end - CHUNK_OVERLAP, start + 1)
 
 
-def parse_pdf(pdf_path: Path) -> list[dict]:
-    """PDF 파일 → 청크 리스트. 워커 프로세스에서 호출."""
-    chunks: list[dict] = []
-    try:
-        with pdfplumber.open(str(pdf_path)) as pdf:
-            for page_num, page in enumerate(pdf.pages, start=1):
+def _extract_pages_pypdf(pdf_path: Path) -> list[tuple[int, str]]:
+    """pypdf로 페이지 추출. 빠르지만 단순한 layout만 잘 됨."""
+    pages: list[tuple[int, str]] = []
+    reader = pypdf.PdfReader(str(pdf_path), strict=False)
+    for page_num, page in enumerate(reader.pages, start=1):
+        try:
+            text = page.extract_text() or ""
+        except Exception:
+            text = ""
+        pages.append((page_num, text))
+    return pages
+
+
+def _extract_pages_pdfplumber(pdf_path: Path) -> list[tuple[int, str]]:
+    """pdfplumber로 정확한 추출. 느림."""
+    pages: list[tuple[int, str]] = []
+    with pdfplumber.open(str(pdf_path)) as pdf:
+        for page_num, page in enumerate(pdf.pages, start=1):
+            try:
                 text = page.extract_text() or ""
-                text = re.sub(r"[ \t]+", " ", text)
-                text = re.sub(r"\n{2,}", "\n", text).strip()
-                if not text:
-                    continue
-                for piece in _chunk_text(text):
-                    if not piece:
-                        continue
-                    chunks.append({
-                        "text": piece,
-                        "source": pdf_path.name,
-                        "page": page_num,
-                        "article": _detect_article(piece),
-                    })
-    except Exception as exc:
-        return [{"_error": f"{type(exc).__name__}: {exc}"}]
+            except Exception:
+                text = ""
+            pages.append((page_num, text))
+    return pages
+
+
+def parse_pdf(pdf_path: Path) -> list[dict]:
+    """PDF → 청크. pypdf 1차, 텍스트가 거의 안 나오는 페이지만 pdfplumber로 보강."""
+    try:
+        pages = _extract_pages_pypdf(pdf_path)
+    except Exception:
+        try:
+            pages = _extract_pages_pdfplumber(pdf_path)
+        except Exception as exc2:
+            return [{"_error": f"{type(exc2).__name__}: {exc2}"}]
+
+    # 전체 텍스트가 너무 짧으면(≤MIN_TEXT_FALLBACK × 페이지수) 한 번 더 pdfplumber 시도
+    total_chars = sum(len(t) for _, t in pages)
+    if pages and total_chars < MIN_TEXT_FALLBACK * len(pages):
+        try:
+            pages = _extract_pages_pdfplumber(pdf_path)
+        except Exception:
+            pass  # pypdf 결과 그대로 사용
+
+    chunks: list[dict] = []
+    for page_num, text in pages:
+        text = re.sub(r"[ \t]+", " ", text or "")
+        text = re.sub(r"\n{2,}", "\n", text).strip()
+        if not text:
+            continue
+        for piece in _chunk_text(text):
+            if not piece:
+                continue
+            chunks.append({
+                "text": piece,
+                "source": pdf_path.name,
+                "page": page_num,
+                "article": _detect_article(piece),
+            })
     return chunks
 
 
@@ -211,9 +251,36 @@ def make_chunk_id(pdf_path: Path, page: int, idx: int) -> str:
 
 
 def parse_pdf_worker(pdf_path_str: str) -> dict:
-    """ProcessPoolExecutor용 wrapper. 직렬화 가능한 dict 반환."""
+    """ProcessPoolExecutor용 wrapper. 직렬화 가능한 dict 반환.
+
+    Windows의 cp949 콘솔 충돌을 피하기 위해 stdout/stderr를 강제 UTF-8화한다.
+    의존성(pdfplumber/pdfminer 등)이 print/warning 시 cp949 인코딩 에러를 내며 워커가 죽는 것을 방지.
+    """
+    import sys, io
+    try:
+        if sys.stdout is not None and hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        if sys.stderr is not None and hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        # 콘솔이 없을 수도 있음 (백그라운드 실행). silently ignore.
+        try:
+            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+    # pdfminer가 stderr로 경고를 쏘는 경우 대비: 로그 레벨 낮춤
+    try:
+        import logging
+        logging.getLogger("pdfminer").setLevel(logging.ERROR)
+        logging.getLogger("pypdf").setLevel(logging.ERROR)
+    except Exception:
+        pass
+
     pdf_path = Path(pdf_path_str)
-    chunks = parse_pdf(pdf_path)
+    try:
+        chunks = parse_pdf(pdf_path)
+    except Exception as exc:
+        chunks = [{"_error": f"{type(exc).__name__}: {exc}"}]
     return {
         "path": pdf_path_str,
         "chunks": chunks,

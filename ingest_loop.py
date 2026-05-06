@@ -13,7 +13,7 @@ import os
 import re
 import sys
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -28,9 +28,25 @@ import chromadb
 from chromadb.config import Settings
 from sentence_transformers import SentenceTransformer
 
-EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
-EMBED_BATCH = 64
-PARSE_WORKERS = max(1, (os.cpu_count() or 4) - 1)
+EMBEDDING_MODEL = os.getenv(
+    "RAG_EMBEDDING_MODEL",
+    "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+)
+EMBED_BATCH = int(os.getenv("RAG_EMBED_BATCH", "128"))
+# 워커 프로세스 수 — 각 워커가 모델을 따로 들고 있으므로 메모리 ~500MB/워커.
+# CPU 18코어, 메모리 16GB → 6워커가 적당 (워커 ~3GB + 메인 + 시스템).
+PARSE_WORKERS = int(os.getenv("RAG_PARSE_WORKERS", "6"))
+# 사이클당 한 번에 처리할 최대 파일 수 (중간 저장 단위)
+BATCH_SIZE = int(os.getenv("RAG_BATCH_SIZE", "200"))
+# 한 PDF 파싱+임베딩 timeout (초)
+PARSE_TIMEOUT = int(os.getenv("RAG_PARSE_TIMEOUT", "120"))
+# upsert를 누적해서 보낼 청크 임계치
+UPSERT_FLUSH_CHUNKS = int(os.getenv("RAG_UPSERT_FLUSH_CHUNKS", "2048"))
+
+# 메인 프로세스는 임베딩하지 않으므로 BLAS 스레드 적게
+os.environ.setdefault("OMP_NUM_THREADS", "2")
+os.environ.setdefault("MKL_NUM_THREADS", "2")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "2")
 
 
 def parse_duration(s: str) -> timedelta:
@@ -136,18 +152,17 @@ def remove_deleted(manifest: Manifest, client, deleted_paths: list[str]) -> int:
 
 
 def index_files(
-    manifest: Manifest, client, model: SentenceTransformer,
+    manifest: Manifest, client, model,  # model 인자는 사용 안 함 (워커가 자체 보유). 호환성 유지.
     pending: list[tuple[Path, str, str, int, float]],
-    progress_every: int = 25,
+    progress_every: int = 50,
 ) -> tuple[int, int, int]:
-    """pending 파일들을 병렬 파싱 + 임베딩 + ChromaDB upsert.
+    """pending 파일들을 ProcessPool로 병렬 파싱+임베딩, 메인은 ChromaDB upsert만.
 
     Returns: (files_processed, chunks_added, errors)
     """
     if not pending:
         return 0, 0, 0
 
-    # 경로 → (category, sha, size, mtime) 매핑 보관
     meta_by_path: dict[str, tuple[str, str, int, float]] = {
         str(p): (cat, sha, size, mtime) for p, cat, sha, size, mtime in pending
     }
@@ -156,7 +171,6 @@ def index_files(
     chunks_total = 0
     errors = 0
 
-    # 컬렉션 캐시 (생성 비용 절약)
     col_cache: dict[str, object] = {}
 
     def get_col(name: str):
@@ -164,55 +178,109 @@ def index_files(
             col_cache[name] = get_collection(client, name)
         return col_cache[name]
 
-    pdf_paths = [str(p) for p, _, _, _, _ in pending]
-    total = len(pdf_paths)
+    # 워커에 (path, category) 튜플로 전달 (워커가 컬렉션명 직접 계산)
+    work_items = [(str(p), cat) for p, cat, _, _, _ in pending]
+    total = len(work_items)
 
-    with ProcessPoolExecutor(max_workers=PARSE_WORKERS) as pool:
-        futures = {pool.submit(parse_pdf_worker, p): p for p in pdf_paths}
+    # 배치를 따로 만들지 않고 한 풀에 모두 submit (manifest 저장은 N파일마다)
+    log(f"  ProcessPool: workers={PARSE_WORKERS}, embed_batch={EMBED_BATCH}, total={total}")
+
+    def make_error_entry(path_str: str) -> FileEntry:
+        cat, sha, size, mtime = meta_by_path[path_str]
+        return FileEntry(
+            path=path_str, category=cat,
+            collection=normalize_category(cat),
+            sha256=sha, size=size, mtime=mtime,
+            chunk_ids=[], chunk_count=0,
+            indexed_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        )
+
+    # 워커가 임베딩까지 완료해서 보내므로 메인은 upsert만 함.
+    # 메모리 절약 위해 일정 청크 누적 시 즉시 upsert.
+    buffer_files: list[dict] = []
+    buffer_chunks_count = 0
+
+    def flush_buffer() -> None:
+        nonlocal buffer_chunks_count, chunks_total, errors
+        if not buffer_files:
+            return
+        # 컬렉션별 그룹핑
+        groups: dict[str, dict] = {}
+        for f in buffer_files:
+            g = groups.setdefault(f["collection"], {
+                "ids": [], "texts": [], "metas": [], "embs": [],
+            })
+            g["ids"].extend(f["ids"])
+            g["texts"].extend(f["texts"])
+            g["metas"].extend(f["metas"])
+            g["embs"].extend(f["embeddings"])
+
+        success_collections = set()
+        for col_name, g in groups.items():
+            try:
+                col = get_col(col_name)
+                col.upsert(
+                    ids=g["ids"], documents=g["texts"],
+                    metadatas=g["metas"], embeddings=g["embs"],
+                )
+                success_collections.add(col_name)
+            except Exception as exc:
+                errors += 1
+                log(f"  ! upsert 실패 [{col_name}] ({len(g['ids'])}청크): {type(exc).__name__}: {exc}")
+
+        for f in buffer_files:
+            if f["collection"] in success_collections:
+                cat = f["category"]
+                sha = f["sha"]; size = f["size"]; mtime = f["mtime"]
+                manifest.upsert(FileEntry(
+                    path=f["path"], category=cat, collection=f["collection"],
+                    sha256=sha, size=size, mtime=mtime,
+                    chunk_ids=f["ids"], chunk_count=len(f["ids"]),
+                    indexed_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                ))
+                chunks_total += len(f["ids"])
+            else:
+                manifest.upsert(make_error_entry(f["path"]))
+
+        buffer_files.clear()
+        buffer_chunks_count = 0
+
+    # ProcessPool로 모든 파일을 한 번에 submit. 워커 init_worker가 모델 미리 로드.
+    from embed_worker import parse_and_embed, init_worker
+
+    t_start = time.time()
+    last_progress_time = t_start
+
+    with ProcessPoolExecutor(max_workers=PARSE_WORKERS, initializer=init_worker) as pool:
+        futures = {pool.submit(parse_and_embed, item): item[0] for item in work_items}
+        log(f"  ✓ {len(futures)}개 작업 submit 완료, 결과 수신 시작")
         for fut in as_completed(futures):
             path_str = futures[fut]
             try:
-                result = fut.result()
+                result = fut.result(timeout=PARSE_TIMEOUT)
             except Exception as exc:
                 errors += 1
-                log(f"  ! 워커 예외 {Path(path_str).name}: {exc}")
-                continue
-
-            chunks = result.get("chunks") or []
-            # 워커가 에러 dict를 반환한 경우
-            if chunks and isinstance(chunks[0], dict) and chunks[0].get("_error"):
-                errors += 1
-                log(f"  ! 파싱 실패 {Path(path_str).name}: {chunks[0]['_error']}")
-                # 빈 entry로 manifest에 기록 (다음 사이클에서 재시도 안 하도록)
-                cat, sha, size, mtime = meta_by_path[path_str]
-                manifest.upsert(FileEntry(
-                    path=path_str, category=cat,
-                    collection=normalize_category(cat),
-                    sha256=sha, size=size, mtime=mtime,
-                    chunk_ids=[], chunk_count=0,
-                    indexed_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                ))
+                log(f"  ! 워커 예외 {Path(path_str).name}: {type(exc).__name__}")
+                manifest.upsert(make_error_entry(path_str))
                 files_done += 1
                 continue
 
-            if not chunks:
-                cat, sha, size, mtime = meta_by_path[path_str]
-                manifest.upsert(FileEntry(
-                    path=path_str, category=cat,
-                    collection=normalize_category(cat),
-                    sha256=sha, size=size, mtime=mtime,
-                    chunk_ids=[], chunk_count=0,
-                    indexed_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                ))
+            if "error" in result:
+                errors += 1
+                log(f"  ! {Path(path_str).name}: {result['error'][:100]}")
+                manifest.upsert(make_error_entry(path_str))
+                files_done += 1
+                continue
+
+            ids = result.get("ids") or []
+            if not ids:
+                manifest.upsert(make_error_entry(path_str))
                 files_done += 1
                 continue
 
             cat, sha, size, mtime = meta_by_path[path_str]
-            collection_name = normalize_category(cat)
-            collection = get_col(collection_name)
-            pdf_path_obj = Path(path_str)
 
-            # 기존 청크가 있다면 삭제 (변경된 파일 처리)
+            # 기존 청크 삭제
             old_entry = manifest.entries.get(path_str)
             if old_entry and old_entry.chunk_ids:
                 try:
@@ -220,55 +288,39 @@ def index_files(
                     for i in range(0, len(old_entry.chunk_ids), 5000):
                         old_col.delete(ids=old_entry.chunk_ids[i:i+5000])
                 except Exception:
-                    pass  # 무시
+                    pass
 
-            # 청크 ID 생성 + 텍스트/메타 분리
-            ids = []
-            texts = []
-            metas = []
-            for idx, c in enumerate(chunks):
-                cid = make_chunk_id(pdf_path_obj, c["page"], idx)
-                ids.append(cid)
-                texts.append(c["text"])
-                metas.append({
-                    "source": c["source"],
-                    "page": c["page"],
-                    "article": c["article"],
-                    "category": cat,
-                })
-
-            # 배치 임베딩
-            embeddings = model.encode(
-                texts,
-                batch_size=EMBED_BATCH,
-                show_progress_bar=False,
-                convert_to_numpy=True,
-                normalize_embeddings=True,
-            ).tolist()
-
-            # ChromaDB upsert
-            try:
-                collection.upsert(
-                    ids=ids, documents=texts, metadatas=metas, embeddings=embeddings,
-                )
-            except Exception as exc:
-                errors += 1
-                log(f"  ! upsert 실패 {pdf_path_obj.name}: {exc}")
-                continue
-
-            manifest.upsert(FileEntry(
-                path=path_str, category=cat,
-                collection=collection_name,
-                sha256=sha, size=size, mtime=mtime,
-                chunk_ids=ids, chunk_count=len(ids),
-                indexed_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            ))
+            buffer_files.append({
+                "path": path_str,
+                "collection": result["collection"],
+                "category": cat,
+                "sha": sha, "size": size, "mtime": mtime,
+                "ids": ids,
+                "texts": result["texts"],
+                "metas": result["metas"],
+                "embeddings": result["embeddings"],
+            })
+            buffer_chunks_count += len(ids)
             files_done += 1
-            chunks_total += len(ids)
+
+            if buffer_chunks_count >= UPSERT_FLUSH_CHUNKS:
+                flush_buffer()
+                manifest.save()
 
             if files_done % progress_every == 0:
-                log(f"  진행 {files_done}/{total} (chunks {chunks_total})")
-                manifest.save()  # 중간 세이브
+                now = time.time()
+                rate = progress_every / max(0.1, now - last_progress_time)
+                last_progress_time = now
+                log(
+                    f"  진행 {files_done}/{total} "
+                    f"(chunks {chunks_total}+{buffer_chunks_count} buf, "
+                    f"errors {errors}, {rate:.1f}f/s = {rate*60:.0f}f/min)"
+                )
+
+    flush_buffer()
+    manifest.save()
+    elapsed = time.time() - t_start
+    log(f"  ✓ 전체 완료: {files_done}/{total} files, {chunks_total} chunks, {errors} err, {elapsed:.0f}s")
 
     return files_done, chunks_total, errors
 

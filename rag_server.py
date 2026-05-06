@@ -33,7 +33,10 @@ load_dotenv(PROJECT_DIR / ".env")
 
 CHROMA_DIR = Path(os.getenv("RAG_CHROMA_DIR", r"D:\rag_data\chroma_db"))
 COLLECTION_NAME = "indonesia_constitution"
-EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
+EMBEDDING_MODEL = os.getenv(
+    "RAG_EMBEDDING_MODEL",
+    "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+)
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
 TOP_K_DEFAULT = 5
 

@@ -35,6 +35,7 @@ const els = {
   historySearch: document.getElementById("historySearch"),
   historyCount: document.getElementById("historyCount"),
   exportBtn: document.getElementById("exportBtn"),
+  starredOnlyBtn: document.getElementById("starredOnlyBtn"),
   themeToggle: document.getElementById("themeToggle"),
   scrollTop: document.getElementById("scrollTop"),
   citeTip: document.getElementById("citeTip"),
@@ -655,10 +656,12 @@ function buildQaCard(item) {
   const collapseBtn = isLong
     ? `<button class="qa-collapse" type="button" aria-pressed="false" aria-label="답변 접기/펼치기" title="긴 답변 접기/펼치기">▴ 접기</button>`
     : "";
+  const starredCls = item.starred ? "is-starred" : "";
   wrap.innerHTML = `
     <header class="qa-head">
       <h3 class="q" title="클릭 → 입력창에 다시 채우기">Q. ${escapeHtml(q)}</h3>
       <div class="qa-actions">
+        <button class="qa-star ${starredCls}" type="button" aria-label="즐겨찾기" aria-pressed="${item.starred ? "true" : "false"}" title="즐겨찾기에 ${item.starred ? "해제" : "추가"}">${item.starred ? "★" : "☆"}</button>
         ${collapseBtn}
         <button class="qa-copy" type="button" aria-label="답변 복사" title="답변을 클립보드에 복사">📋 복사</button>
         <button class="qa-del" type="button" aria-label="이 질문 삭제" title="삭제">✕</button>
@@ -672,6 +675,37 @@ function buildQaCard(item) {
       <ul class="src-list">${srcHtml}</ul>
     </details>
   `;
+
+  // 답변 본문 자동 TOC: 헤딩이 2개 이상이면 .a 맨 위에 목차 삽입
+  const headingNodes = wrap.querySelectorAll(".a .a-h");
+  if (headingNodes.length >= 2) {
+    const aDiv = wrap.querySelector(".a");
+    const toc = document.createElement("nav");
+    toc.className = "a-toc";
+    toc.setAttribute("aria-label", "답변 목차");
+    const tocTitle = document.createElement("div");
+    tocTitle.className = "a-toc-title";
+    tocTitle.textContent = `📑 목차 (${headingNodes.length}개 섹션)`;
+    toc.appendChild(tocTitle);
+    const ol = document.createElement("ol");
+    ol.className = "a-toc-list";
+    headingNodes.forEach((h, i) => {
+      const aid = `${item.id}-h${i}`;
+      h.id = aid;
+      const li = document.createElement("li");
+      const link = document.createElement("a");
+      link.href = `#${aid}`;
+      link.textContent = h.textContent;
+      link.addEventListener("click", (e) => {
+        e.preventDefault();
+        h.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+      li.appendChild(link);
+      ol.appendChild(li);
+    });
+    toc.appendChild(ol);
+    aDiv.insertBefore(toc, aDiv.firstChild);
+  }
 
   // 인용 칩 인터랙션: 클릭 → 점프, 호버 → 미리보기 툴팁
   const findSourceForCite = (cite) => {
@@ -759,6 +793,24 @@ function buildQaCard(item) {
       }
     });
   });
+
+  // 즐겨찾기 토글
+  const starBtn = wrap.querySelector(".qa-star");
+  if (starBtn) {
+    starBtn.addEventListener("click", () => {
+      const idx = historyItems.findIndex((x) => x.id === item.id);
+      if (idx === -1) return;
+      historyItems[idx].starred = !historyItems[idx].starred;
+      item.starred = historyItems[idx].starred;
+      saveHistoryItems(historyItems);
+      starBtn.textContent = item.starred ? "★" : "☆";
+      starBtn.classList.toggle("is-starred", !!item.starred);
+      starBtn.setAttribute("aria-pressed", item.starred ? "true" : "false");
+      starBtn.title = `즐겨찾기에 ${item.starred ? "해제" : "추가"}`;
+      applyHistoryFilter(); // 필터가 즐겨찾기만 모드면 즉시 반영
+      updateHistoryToolbar();
+    });
+  }
 
   // 접기/펼치기 버튼
   const collapseBtnEl = wrap.querySelector(".qa-collapse");
@@ -984,6 +1036,7 @@ function applyHistoryFilter() {
   if (!els.historySearch) return;
   const q = (els.historySearch.value || "").trim();
   const qLower = q.toLowerCase();
+  const starredOnly = els.starredOnlyBtn?.getAttribute("aria-pressed") === "true";
   const cards = els.history.querySelectorAll(".qa");
 
   // 빈 검색결과 placeholder 제거 (뒤에서 필요시 다시 삽입)
@@ -992,28 +1045,36 @@ function applyHistoryFilter() {
   // 모든 카드의 기존 하이라이트 먼저 제거
   cards.forEach((c) => clearSearchHighlights(c));
 
-  if (!qLower) {
-    cards.forEach((c) => { c.hidden = false; });
-    updateHistoryToolbar();
-    return;
-  }
+  // ID로 historyItems 매핑 → starred 여부 확인용
+  const starredIds = new Set(historyItems.filter((x) => x.starred).map((x) => x.id));
+
   let visibleCount = 0;
   cards.forEach((card) => {
-    const text = card.textContent.toLowerCase();
-    const match = text.includes(qLower);
-    card.hidden = !match;
-    if (match) {
-      highlightTextIn(card, q);
-      visibleCount++;
+    const id = card.dataset.id;
+    let visible = true;
+    if (starredOnly && !starredIds.has(id)) visible = false;
+    if (visible && qLower) {
+      const text = card.textContent.toLowerCase();
+      if (!text.includes(qLower)) visible = false;
     }
+    card.hidden = !visible;
+    if (visible && qLower) {
+      highlightTextIn(card, q);
+    }
+    if (visible) visibleCount++;
   });
   if (visibleCount === 0 && cards.length > 0) {
     const note = document.createElement("div");
     note.className = "no-match";
+    const reason = starredOnly && qLower
+      ? `즐겨찾기 + "${escapeHtml(q)}" 조건에 해당하는 항목이 없습니다`
+      : starredOnly
+        ? `즐겨찾기로 표시한 항목이 없습니다`
+        : `"${escapeHtml(q)}" 와 일치하는 항목이 없습니다`;
     note.innerHTML = `
       <div class="empty-icon">🔍</div>
-      <p class="empty-title">"${escapeHtml(q)}" 와 일치하는 항목이 없습니다</p>
-      <p class="empty-sub">검색어를 줄이거나 다른 키워드를 시도해보세요.</p>`;
+      <p class="empty-title">${reason}</p>
+      <p class="empty-sub">필터/검색어를 조정해 보세요.</p>`;
     els.history.appendChild(note);
   }
   updateHistoryToolbar();
@@ -1558,6 +1619,13 @@ els.historySearch?.addEventListener("input", () => {
 els.historySort?.addEventListener("change", () => {
   if (!historyItems.length) return;
   renderHistoryAll();
+});
+
+// 즐겨찾기만 토글
+els.starredOnlyBtn?.addEventListener("click", () => {
+  const cur = els.starredOnlyBtn.getAttribute("aria-pressed") === "true";
+  els.starredOnlyBtn.setAttribute("aria-pressed", cur ? "false" : "true");
+  applyHistoryFilter();
 });
 
 // 페이지 로드 시 테마 → 폰트 사이즈 → 코퍼스 정렬 → 히스토리 → 예시 → 헬스체크.

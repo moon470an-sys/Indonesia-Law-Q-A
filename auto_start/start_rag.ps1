@@ -55,17 +55,17 @@ $uvProc = Start-Process -FilePath $Python `
     -PassThru
 Write-Log "uvicorn started pid=$($uvProc.Id)"
 
-# 3) wait for /health (max 90 sec)
+# 3) wait for /health (max ~10 min — 2.5M청크 8컬렉션 ChromaDB 로드가 3분+ 걸림)
 $healthy = $false
-for ($i = 0; $i -lt 45; $i++) {
+for ($i = 0; $i -lt 150; $i++) {
     try {
-        $r = Invoke-WebRequest -Uri "http://127.0.0.1:8000/health" -UseBasicParsing -TimeoutSec 2
+        $r = Invoke-WebRequest -Uri "http://127.0.0.1:8000/health" -UseBasicParsing -TimeoutSec 4
         if ($r.StatusCode -eq 200) { $healthy = $true; break }
     } catch {}
-    Start-Sleep -Seconds 2
+    Start-Sleep -Seconds 4
 }
-if (-not $healthy) { Write-Log "ERR: uvicorn /health did not respond"; exit 1 }
-Write-Log "uvicorn healthy"
+if (-not $healthy) { Write-Log "ERR: uvicorn /health did not respond within 10 min"; exit 1 }
+Write-Log "uvicorn healthy after $($i*4)s"
 
 # 4) start cloudflared
 $cfOut = "$LogDir\cloudflared.log"
@@ -102,24 +102,10 @@ $content = "[InternetShortcut]`r`nURL=$PageBase" + "?api=$encoded`r`n"
 
 Write-Log "shortcut updated: $shortcutPath"
 
-# 7) ingest 자동 재개 (manifest 기반 증분이라 재실행 안전)
-try {
-    $env:PYTHONUTF8 = "1"
-    $env:PYTHONIOENCODING = "utf-8"
-    $env:RAG_PARSE_WORKERS = "6"
-    $env:RAG_EMBED_BATCH = "128"
-    $env:RAG_PARSE_TIMEOUT = "120"
-    $env:RAG_UPSERT_FLUSH_CHUNKS = "2048"
-    $ingestProc = Start-Process -FilePath $Python `
-        -ArgumentList "-X", "utf8", "ingest_loop.py", "--duration", "999h", "--interval", "60s" `
-        -WorkingDirectory $Project -WindowStyle Hidden `
-        -RedirectStandardOutput (Join-Path $LogDir "ingest_resume.log") `
-        -RedirectStandardError (Join-Path $LogDir "ingest_resume.err") `
-        -PassThru
-    Write-Log "ingest auto-resumed pid=$($ingestProc.Id)"
-} catch {
-    Write-Log "ingest resume failed: $_"
-}
+# 7) ingest 자동 재개 — 비활성화 (2026-05-10).
+#    인덱싱은 1회 마무리 완료. 남은 1,629건은 텍스트 추출 불가 PDF(스캔/이미지)라
+#    매 사이클 0 청크 반환만 반복하므로 자동 재개 시 CPU만 낭비. OCR 도입 전까지 보류.
+#    수동으로 다시 돌리려면: powershell -ExecutionPolicy Bypass -File auto_start\resume_ingest.ps1
 
 Write-Log "=== done ==="
 exit 0

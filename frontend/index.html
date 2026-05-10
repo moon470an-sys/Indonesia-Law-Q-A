@@ -3,16 +3,25 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>인도네시아 헌법 Q&amp;A</title>
+  <title>인도네시아 법령 Q&amp;A</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <header class="topbar">
-    <h1>📜 인도네시아 헌법 Q&amp;A</h1>
+    <h1>📜 인도네시아 법령 Q&amp;A</h1>
     <div class="status" id="status">백엔드 상태 확인 중…</div>
   </header>
 
   <main>
+    <section class="corpus" id="corpus" hidden>
+      <div class="corpus-head">
+        <h2>📚 인덱싱된 법령 코퍼스</h2>
+        <span class="corpus-total" id="corpusTotal">—</span>
+      </div>
+      <div class="corpus-grid" id="corpusGrid"></div>
+      <p class="hint">카드를 클릭하면 해당 법령 종류로 검색 범위가 한정됩니다 (다중 선택 가능, 다시 클릭하면 해제).</p>
+    </section>
+
     <section class="settings">
       <details>
         <summary>⚙️ 백엔드 연결 설정</summary>
@@ -49,7 +58,7 @@
     </section>
 
     <section class="ask">
-      <textarea id="question" rows="3" placeholder="인도네시아 헌법에 관해 질문하세요…"></textarea>
+      <textarea id="question" rows="3" placeholder="인도네시아 법령에 관해 질문하세요…"></textarea>
       <div class="row">
         <button id="askBtn" class="primary">질문하기</button>
         <button id="clearBtn" class="secondary">대화 초기화</button>

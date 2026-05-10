@@ -17,7 +17,38 @@ const els = {
   question: document.getElementById("question"),
   history: document.getElementById("history"),
   status: document.getElementById("status"),
+  corpus: document.getElementById("corpus"),
+  corpusGrid: document.getElementById("corpusGrid"),
+  corpusTotal: document.getElementById("corpusTotal"),
 };
+
+// indonesia_* 컬렉션명 → 한국어 표시명 + 약어 매핑.
+const COLLECTION_META = {
+  indonesia_constitution: { ko: "헌법", abbr: "UUD" },
+  indonesia_uu:           { ko: "법률", abbr: "UU" },
+  indonesia_pp:           { ko: "정부령", abbr: "PP" },
+  indonesia_perpres:      { ko: "대통령령", abbr: "Perpres" },
+  indonesia_permen:       { ko: "장관령", abbr: "Permen" },
+  indonesia_kepmen:       { ko: "장관결정", abbr: "Kepmen" },
+  indonesia_perda:        { ko: "지방조례", abbr: "Perda" },
+  indonesia_lainnya:      { ko: "기타", abbr: "Lainnya" },
+};
+const COLLECTION_ORDER = [
+  "indonesia_constitution",
+  "indonesia_uu",
+  "indonesia_pp",
+  "indonesia_perpres",
+  "indonesia_permen",
+  "indonesia_kepmen",
+  "indonesia_perda",
+  "indonesia_lainnya",
+];
+
+const selectedCategories = new Set(); // 사용자가 클릭으로 선택한 컬렉션명들
+
+function formatCount(n) {
+  return Number(n || 0).toLocaleString("ko-KR");
+}
 
 async function fetchAutoUrl() {
   try {
@@ -88,6 +119,84 @@ async function tryHealthOnce(base) {
   return data;
 }
 
+function applyHealth(data) {
+  if (data.ok && data.collection_count > 0) {
+    setStatus(`연결 OK · 청크 ${formatCount(data.collection_count)}개 로드됨`, "ok");
+    renderCorpus(data.collections || {}, data.collection_count);
+  } else if (data.ok) {
+    setStatus("연결 OK · DB 비어있음 (ingest.py 실행 필요)", "warn");
+    els.corpus.hidden = true;
+  } else {
+    setStatus(`서버 오류: ${data.error || "unknown"}`, "err");
+    els.corpus.hidden = true;
+  }
+}
+
+function renderCorpus(perCollection, total) {
+  const entries = Object.entries(perCollection || {}).filter(([, n]) => n > 0);
+  if (!entries.length) {
+    els.corpus.hidden = true;
+    return;
+  }
+  // 미리 정의된 순서에 따라 정렬, 그 외는 뒤에 추가.
+  entries.sort(([a], [b]) => {
+    const ia = COLLECTION_ORDER.indexOf(a);
+    const ib = COLLECTION_ORDER.indexOf(b);
+    if (ia === -1 && ib === -1) return a.localeCompare(b);
+    if (ia === -1) return 1;
+    if (ib === -1) return -1;
+    return ia - ib;
+  });
+  const max = entries.reduce((m, [, n]) => Math.max(m, n), 1);
+
+  els.corpusTotal.textContent = `총 ${formatCount(total)}개 청크 · ${entries.length}개 카테고리`;
+  els.corpusGrid.innerHTML = entries
+    .map(([name, count]) => {
+      const meta = COLLECTION_META[name] || { ko: name.replace(/^indonesia_/, ""), abbr: name };
+      const pct = Math.max(2, Math.round((count / max) * 100));
+      const pressed = selectedCategories.has(name) ? "true" : "false";
+      return `
+        <div class="corpus-card" data-col="${escapeHtml(name)}" role="button" tabindex="0" aria-pressed="${pressed}" title="${escapeHtml(meta.ko)} (${escapeHtml(meta.abbr)})">
+          <div class="cc-name">${escapeHtml(meta.ko)}</div>
+          <div class="cc-abbr">${escapeHtml(meta.abbr)}</div>
+          <div class="cc-count">${formatCount(count)}<span class="cc-count-suffix">청크</span></div>
+          <div class="cc-bar"><span style="width: ${pct}%"></span></div>
+        </div>`;
+    })
+    .join("");
+  els.corpus.hidden = false;
+
+  els.corpusGrid.querySelectorAll(".corpus-card").forEach((card) => {
+    const name = card.dataset.col;
+    const toggle = () => {
+      if (selectedCategories.has(name)) selectedCategories.delete(name);
+      else selectedCategories.add(name);
+      card.setAttribute("aria-pressed", selectedCategories.has(name) ? "true" : "false");
+      updateScopeIndicator();
+    };
+    card.addEventListener("click", toggle);
+    card.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        toggle();
+      }
+    });
+  });
+  updateScopeIndicator();
+}
+
+function updateScopeIndicator() {
+  // 선택된 카테고리가 있으면 ask 영역에 작은 표시. 미니멀하게 placeholder 변경.
+  if (!selectedCategories.size) {
+    els.question.placeholder = "인도네시아 법령에 관해 질문하세요…";
+  } else {
+    const names = [...selectedCategories]
+      .map((n) => (COLLECTION_META[n]?.ko) || n)
+      .join(", ");
+    els.question.placeholder = `[${names}] 범위에서 질문하세요…`;
+  }
+}
+
 async function checkHealth() {
   let base = apiBase();
   if (!base) {
@@ -96,14 +205,7 @@ async function checkHealth() {
   }
   setStatus("연결 확인 중…", "info");
   try {
-    const data = await tryHealthOnce(base);
-    if (data.ok && data.collection_count > 0) {
-      setStatus(`연결 OK · 청크 ${data.collection_count}개 로드됨`, "ok");
-    } else if (data.ok) {
-      setStatus("연결 OK · DB 비어있음 (ingest.py 실행 필요)", "warn");
-    } else {
-      setStatus(`서버 오류: ${data.error || "unknown"}`, "err");
-    }
+    applyHealth(await tryHealthOnce(base));
     return;
   } catch (e) {
     // 첫 실패 → tunnel.json refetch 후 재시도. 죽은 URL은 어차피 보존 의미가 없으므로 차이만 있으면 무조건 갱신.
@@ -113,14 +215,7 @@ async function checkHealth() {
       localStorage.removeItem(LS_KEYS.url);
       setStatus(`URL 자동 갱신 (${newAuto}) 재시도 중…`, "info");
       try {
-        const data = await tryHealthOnce(newAuto);
-        if (data.ok && data.collection_count > 0) {
-          setStatus(`연결 OK · 청크 ${data.collection_count}개 로드됨`, "ok");
-        } else if (data.ok) {
-          setStatus("연결 OK · DB 비어있음 (ingest.py 실행 필요)", "warn");
-        } else {
-          setStatus(`서버 오류: ${data.error || "unknown"}`, "err");
-        }
+        applyHealth(await tryHealthOnce(newAuto));
         return;
       } catch (e2) {
         setStatus(`연결 실패 (자동 갱신 후도): ${e2.message}`, "err");
@@ -180,10 +275,12 @@ function renderItem(q, a, sources) {
 }
 
 async function postQueryOnce(base, q, topK) {
+  const body = { question: q, top_k: topK };
+  if (selectedCategories.size) body.categories = [...selectedCategories];
   const r = await fetch(`${base}/query`, {
     method: "POST",
     headers: authHeaders(),
-    body: JSON.stringify({ question: q, top_k: topK }),
+    body: JSON.stringify(body),
   });
   if (!r.ok) {
     const text = await r.text();
@@ -204,7 +301,10 @@ async function askQuestion() {
 
   els.askBtn.disabled = true;
   els.askBtn.textContent = "답변 생성 중…";
-  setStatus("Claude가 헌법 문서를 검토하는 중…", "info");
+  const scope = selectedCategories.size
+    ? [...selectedCategories].map((n) => COLLECTION_META[n]?.ko || n).join(", ")
+    : "전체 법령";
+  setStatus(`Claude가 ${scope} 문서를 검토하는 중…`, "info");
 
   try {
     let data;

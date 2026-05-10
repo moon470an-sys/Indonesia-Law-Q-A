@@ -30,6 +30,10 @@ async function fetchAutoUrl() {
   }
 }
 
+function normalizeUrl(u) {
+  return (u || "").trim().replace(/\/+$/, "");
+}
+
 async function loadSettings() {
   const cfg = window.APP_CONFIG || {};
 
@@ -39,12 +43,19 @@ async function loadSettings() {
     localStorage.setItem(LS_KEYS.url, urlFromQuery);
     history.replaceState(null, "", location.pathname);
   }
+  // ?reset=1 로 stale localStorage 청소
+  if (params.get("reset")) {
+    localStorage.removeItem(LS_KEYS.url);
+    history.replaceState(null, "", location.pathname);
+  }
 
-  const storedUrl = localStorage.getItem(LS_KEYS.url) || "";
+  const storedUrl = normalizeUrl(localStorage.getItem(LS_KEYS.url));
   const autoUrl = await fetchAutoUrl();
 
-  // 우선순위: localStorage(사용자 명시) > tunnel.json(자동) > config 기본값
-  els.apiUrl.value = storedUrl || autoUrl || cfg.defaultApiUrl || "";
+  // tunnel.json이 발급된 fresh URL을 가지고 있으면 항상 그걸 우선.
+  // localStorage 우선이면 옛 죽은 URL이 새 URL을 덮는 stale 문제가 생김.
+  // 사용자가 ?api=...로 명시 지정한 경우는 위에서 storedUrl로 덮어 씌워졌으니 보존됨.
+  els.apiUrl.value = autoUrl || storedUrl || cfg.defaultApiUrl || "";
   els.apiToken.value = localStorage.getItem(LS_KEYS.token) || "";
   els.topK.value = localStorage.getItem(LS_KEYS.topK) || cfg.defaultTopK || 5;
 }
@@ -95,10 +106,9 @@ async function checkHealth() {
     }
     return;
   } catch (e) {
-    // 첫 실패: tunnel.json refetch 후 재시도. 사용자가 수동 입력한 URL이 아니라면 자동 갱신.
-    const stored = localStorage.getItem(LS_KEYS.url) || "";
+    // 첫 실패 → tunnel.json refetch 후 재시도. 죽은 URL은 어차피 보존 의미가 없으므로 차이만 있으면 무조건 갱신.
     const newAuto = await fetchAutoUrl();
-    if (newAuto && newAuto !== base && (!stored || stored === base)) {
+    if (newAuto && newAuto !== base) {
       els.apiUrl.value = newAuto;
       localStorage.removeItem(LS_KEYS.url);
       setStatus(`URL 자동 갱신 (${newAuto}) 재시도 중…`, "info");
@@ -202,9 +212,8 @@ async function askQuestion() {
       data = await postQueryOnce(base, q, topK);
     } catch (e) {
       // cloudflared URL이 바뀐 경우: tunnel.json refetch 후 한 번 재시도
-      const stored = localStorage.getItem(LS_KEYS.url) || "";
       const newAuto = await fetchAutoUrl();
-      if (newAuto && newAuto !== base && (!stored || stored === base)) {
+      if (newAuto && newAuto !== base) {
         els.apiUrl.value = newAuto;
         localStorage.removeItem(LS_KEYS.url);
         setStatus(`URL 자동 갱신 (${newAuto}) 재시도 중…`, "info");

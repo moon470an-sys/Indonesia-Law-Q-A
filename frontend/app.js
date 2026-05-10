@@ -155,8 +155,9 @@ function renderCorpus(perCollection, total) {
       const meta = COLLECTION_META[name] || { ko: name.replace(/^indonesia_/, ""), abbr: name };
       const pct = Math.max(2, Math.round((count / max) * 100));
       const pressed = selectedCategories.has(name) ? "true" : "false";
+      const hueCls = categoryHueClass(name);
       return `
-        <div class="corpus-card" data-col="${escapeHtml(name)}" role="button" tabindex="0" aria-pressed="${pressed}" title="${escapeHtml(meta.ko)} (${escapeHtml(meta.abbr)})">
+        <div class="corpus-card ${hueCls}" data-col="${escapeHtml(name)}" role="button" tabindex="0" aria-pressed="${pressed}" title="${escapeHtml(meta.ko)} (${escapeHtml(meta.abbr)})">
           <div class="cc-name">${escapeHtml(meta.ko)}</div>
           <div class="cc-abbr">${escapeHtml(meta.abbr)}</div>
           <div class="cc-count">${formatCount(count)}<span class="cc-count-suffix">청크</span></div>
@@ -234,41 +235,163 @@ function escapeHtml(s) {
     .replaceAll('"', "&quot;");
 }
 
-function renderAnswer(answer) {
-  // 줄바꿈만 보존 (간단 마크다운). 본문은 신뢰 가능한 LLM 출력이지만 안전하게 escape 후 <br>.
-  return escapeHtml(answer).replaceAll("\n", "<br>");
+// 인용 패턴: (Pasal 6A, 출처: 파일명) 또는 (출처: 파일명) → 칩 처리.
+const CITE_RE = /\(([^()]*?(?:Pasal|출처)[^()]*?)\)/g;
+
+function renderInline(line) {
+  // 먼저 escape, 그 다음 안전한 인라인 마크다운만 변환.
+  let out = escapeHtml(line);
+  // **bold**
+  out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  // (Pasal X, 출처: ...) → 인용 칩
+  out = out.replace(CITE_RE, '<span class="cite">$1</span>');
+  return out;
 }
 
-function renderItem(q, a, sources) {
+function renderAnswer(answer) {
+  // Claude 출력 마크다운 일부를 렌더링: 볼드, 순서/비순서 리스트, 헤딩, 단락.
+  const lines = String(answer || "").replace(/\r\n/g, "\n").split("\n");
+  const blocks = [];
+  let buf = [];
+  let listType = null; // "ul" | "ol" | null
+  const flushPara = () => {
+    if (buf.length) {
+      blocks.push(`<p>${buf.map(renderInline).join("<br>")}</p>`);
+      buf = [];
+    }
+  };
+  const flushList = () => {
+    if (listType && buf.length) {
+      const items = buf.map((t) => `<li>${renderInline(t)}</li>`).join("");
+      blocks.push(`<${listType}>${items}</${listType}>`);
+    }
+    buf = [];
+    listType = null;
+  };
+  const flush = () => {
+    if (listType) flushList();
+    else flushPara();
+  };
+
+  for (const raw of lines) {
+    const line = raw.trimEnd();
+    if (!line.trim()) {
+      flush();
+      continue;
+    }
+    const ulM = line.match(/^\s*[-*]\s+(.+)$/);
+    const olM = line.match(/^\s*\d+\.\s+(.+)$/);
+    const hM = line.match(/^\s*(#{1,3})\s+(.+)$/);
+
+    if (hM) {
+      flush();
+      const level = Math.min(hM[1].length + 2, 4); // ## → h4 등 너무 크지 않게
+      blocks.push(`<h${level} class="a-h">${renderInline(hM[2])}</h${level}>`);
+      continue;
+    }
+    if (ulM) {
+      if (listType !== "ul") flush();
+      listType = "ul";
+      buf.push(ulM[1]);
+      continue;
+    }
+    if (olM) {
+      if (listType !== "ol") flush();
+      listType = "ol";
+      buf.push(olM[1]);
+      continue;
+    }
+    // 일반 단락 라인
+    if (listType) flushList();
+    buf.push(line);
+  }
+  flush();
+  return blocks.join("");
+}
+
+// rag_server는 category에 폴더명(한국어) 또는 컬렉션명을 넣을 수 있음. 한국어로 정규화.
+function categoryKo(cat) {
+  if (!cat) return "";
+  if (COLLECTION_META[cat]) return COLLECTION_META[cat].ko;
+  // 폴더명에서 prefix가 있을 수 있음 (예: "헌법", "법률_UU")
+  const head = String(cat).split(/[_\s]/)[0];
+  return head || cat;
+}
+
+function categoryHueClass(cat) {
+  // 한국어 또는 컬렉션명 둘 다 매핑.
+  const k = categoryKo(cat);
+  const map = {
+    "헌법": "cat-uud",
+    "법률": "cat-uu",
+    "정부령": "cat-pp",
+    "대통령령": "cat-perpres",
+    "장관령": "cat-permen",
+    "장관결정": "cat-kepmen",
+    "지방조례": "cat-perda",
+    "기타": "cat-lainnya",
+  };
+  return map[k] || "cat-lainnya";
+}
+
+function shortenFileName(name, max = 64) {
+  const s = String(name || "");
+  if (s.length <= max) return s;
+  // 가운데 줄임표
+  const head = Math.ceil((max - 1) / 2);
+  const tail = Math.floor((max - 1) / 2);
+  return s.slice(0, head) + "…" + s.slice(-tail);
+}
+
+function renderSource(s, i) {
+  const article = s.article || "조항 미확인";
+  const score = Number(s.score) || 0;
+  const scorePct = Math.max(0, Math.min(100, Math.round(score * 100)));
+  const cat = s.category || "";
+  const catKo = categoryKo(cat);
+  const hueCls = categoryHueClass(cat);
+  return `
+    <li class="src-card ${hueCls}">
+      <header class="src-top">
+        <span class="src-idx">#${i + 1}</span>
+        ${catKo ? `<span class="src-cat">${escapeHtml(catKo)}</span>` : ""}
+        <span class="src-score-wrap" title="유사도 ${score.toFixed(3)}">
+          <span class="src-score-bar"><span style="width:${scorePct}%"></span></span>
+          <span class="src-score-num">${score.toFixed(2)}</span>
+        </span>
+      </header>
+      <div class="src-name" title="${escapeHtml(s.source || "")}">${escapeHtml(shortenFileName(s.source))}</div>
+      <div class="src-meta">
+        <span class="src-page">p.${escapeHtml(String(s.page ?? "?"))}</span>
+        <span class="src-sep">·</span>
+        <span class="src-article">${escapeHtml(article)}</span>
+      </div>
+      <pre class="src-snippet">${escapeHtml(s.snippet || "")}</pre>
+    </li>`;
+}
+
+function renderItem(q, a, sources, meta) {
   const wrap = document.createElement("article");
   wrap.className = "qa";
-  const srcHtml = (sources || [])
-    .map((s, i) => {
-      const article = s.article || "조항 미확인";
-      const score = (s.score || 0).toFixed(3);
-      const cat = s.category || "";
-      const catHtml = cat ? `<span class="src-cat">${escapeHtml(cat)}</span>` : "";
-      return `
-        <li>
-          <div class="src-meta">
-            <span class="src-idx">[${i + 1}]</span>
-            ${catHtml}
-            <span class="src-name">${escapeHtml(s.source)}</span>
-            <span class="src-page">p.${s.page}</span>
-            <span class="src-article">${escapeHtml(article)}</span>
-            <span class="src-score">유사도 ${score}</span>
-          </div>
-          <pre class="src-snippet">${escapeHtml(s.snippet)}</pre>
-        </li>`;
-    })
-    .join("");
+  const srcHtml = (sources || []).map(renderSource).join("");
+
+  const scopeText = meta?.scope?.length
+    ? meta.scope.map((c) => COLLECTION_META[c]?.ko || c).join(", ")
+    : "전체 법령";
+  const elapsed = meta?.elapsedMs ? `${(meta.elapsedMs / 1000).toFixed(1)}s` : "";
+  const metaBits = [
+    `<span class="qa-meta-item">📂 ${escapeHtml(scopeText)}</span>`,
+    `<span class="qa-meta-item">🔎 출처 ${sources?.length || 0}건</span>`,
+    elapsed ? `<span class="qa-meta-item">⏱ ${elapsed}</span>` : "",
+  ].filter(Boolean).join("");
 
   wrap.innerHTML = `
     <h3 class="q">Q. ${escapeHtml(q)}</h3>
+    <div class="qa-meta">${metaBits}</div>
     <div class="a">${renderAnswer(a)}</div>
-    <details class="sources">
+    <details class="sources" ${sources?.length ? "open" : ""}>
       <summary>🔎 검색된 출처 ${sources?.length || 0}건</summary>
-      <ul>${srcHtml}</ul>
+      <ul class="src-list">${srcHtml}</ul>
     </details>
   `;
   els.history.prepend(wrap);
@@ -306,6 +429,8 @@ async function askQuestion() {
     : "전체 법령";
   setStatus(`Claude가 ${scope} 문서를 검토하는 중…`, "info");
 
+  const t0 = performance.now();
+  const scope = [...selectedCategories];
   try {
     let data;
     try {
@@ -323,7 +448,8 @@ async function askQuestion() {
         throw e;
       }
     }
-    renderItem(q, data.answer, data.sources || []);
+    const elapsedMs = performance.now() - t0;
+    renderItem(q, data.answer, data.sources || [], { scope, elapsedMs });
     els.question.value = "";
     setStatus("답변 생성 완료", "ok");
   } catch (e) {

@@ -269,69 +269,205 @@ button.secondary:hover { border-color: var(--accent); }
   gap: 16px;
 }
 
+/* ===== Q&A 카드 ===== */
 .qa {
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 16px 20px;
+  border-radius: 10px;
+  padding: 18px 22px;
 }
 .qa .q {
-  margin: 0 0 8px;
+  margin: 0 0 6px;
   color: var(--accent);
-  font-size: 16px;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.qa-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px dashed var(--border);
+}
+.qa-meta-item {
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
 }
 .qa .a {
   font-size: 15px;
-  white-space: normal;
+  line-height: 1.65;
+}
+.qa .a p { margin: 0 0 10px; }
+.qa .a p:last-child { margin-bottom: 0; }
+.qa .a ul, .qa .a ol {
+  margin: 6px 0 12px;
+  padding-left: 22px;
+}
+.qa .a li { margin: 2px 0; }
+.qa .a strong { color: var(--text); font-weight: 700; }
+.qa .a .a-h {
+  margin: 12px 0 6px;
+  font-size: 14px;
+  color: var(--accent);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+.qa .a .cite {
+  display: inline;
+  background: rgba(56,189,248,0.14);
+  color: var(--accent);
+  border: 1px solid rgba(56,189,248,0.35);
+  border-radius: 4px;
+  padding: 0 6px;
+  font-size: 0.88em;
+  font-weight: 500;
+  white-space: nowrap;
 }
 
+/* ===== 출처 카드 ===== */
 .sources {
-  margin-top: 12px;
+  margin-top: 14px;
   border-top: 1px solid var(--border);
-  padding-top: 8px;
+  padding-top: 10px;
 }
 .sources summary {
   cursor: pointer;
   color: var(--muted);
   font-size: 13px;
+  list-style: none;
+  user-select: none;
 }
-.sources ul {
+.sources summary::-webkit-details-marker { display: none; }
+.sources summary::before {
+  content: "▸";
+  display: inline-block;
+  margin-right: 6px;
+  transition: transform 120ms ease;
+}
+.sources[open] summary::before { transform: rotate(90deg); }
+
+.src-list {
   list-style: none;
   padding: 0;
-  margin: 8px 0 0;
+  margin: 10px 0 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 10px;
+}
+.src-card {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--cat-color, var(--accent));
+  border-radius: 6px;
+  padding: 10px 12px;
   display: flex;
   flex-direction: column;
+  gap: 6px;
+}
+.src-top {
+  display: flex;
+  align-items: center;
   gap: 8px;
+  font-size: 12px;
+}
+.src-idx {
+  color: var(--muted);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.src-cat {
+  background: color-mix(in srgb, var(--cat-color, var(--accent)) 18%, transparent);
+  color: var(--cat-color, var(--accent));
+  border: 1px solid color-mix(in srgb, var(--cat-color, var(--accent)) 50%, transparent);
+  border-radius: 4px;
+  padding: 1px 7px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+.src-score-wrap {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.src-score-bar {
+  width: 48px;
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.src-score-bar > span {
+  display: block;
+  height: 100%;
+  background: var(--cat-color, var(--accent));
+  border-radius: 2px;
+}
+.src-score-num {
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.src-name {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+  word-break: break-all;
+  line-height: 1.35;
 }
 .src-meta {
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  font-size: 12px;
+  gap: 6px;
+  font-size: 11.5px;
   color: var(--muted);
+  flex-wrap: wrap;
 }
-.src-idx { color: var(--accent); font-weight: 600; }
-.src-cat {
-  background: var(--panel-2);
-  color: var(--accent);
-  border: 1px solid var(--accent);
-  border-radius: 4px;
-  padding: 1px 6px;
-  font-size: 11px;
-  font-weight: 600;
-}
-.src-name { color: var(--text); }
+.src-sep { opacity: 0.5; }
+.src-article { color: var(--text); }
 .src-snippet {
   margin: 4px 0 0;
-  padding: 8px;
-  background: var(--panel-2);
+  padding: 8px 10px;
+  background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 4px;
   font-size: 12.5px;
   white-space: pre-wrap;
   word-break: break-word;
   font-family: ui-monospace, "Cascadia Code", Menlo, monospace;
+  max-height: 9em;
+  overflow: auto;
+  line-height: 1.5;
 }
+
+/* ===== 카테고리별 색상 ===== */
+.cat-uud      { --cat-color: #c4b5fd; }  /* 헌법 - 보라 */
+.cat-uu       { --cat-color: #38bdf8; }  /* 법률 - 시안 */
+.cat-pp       { --cat-color: #2dd4bf; }  /* 정부령 - 틸 */
+.cat-perpres  { --cat-color: #f472b6; }  /* 대통령령 - 핑크 */
+.cat-permen   { --cat-color: #fb923c; }  /* 장관령 - 오렌지 */
+.cat-kepmen   { --cat-color: #facc15; }  /* 장관결정 - 옐로 */
+.cat-perda    { --cat-color: #4ade80; }  /* 지방조례 - 그린 */
+.cat-lainnya  { --cat-color: #94a3b8; }  /* 기타 - 그레이 */
+
+/* corpus-card에도 동일 색 적용. 컬렉션명을 클래스로도 주기 위해 cards에 클래스 매핑은 JS에서 처리하거나
+   — 간단히 카드 내부 cc-name 색은 cat-color로 변하도록 별도 변수 사용 */
+.corpus-card.cat-uud      { --cat-color: #c4b5fd; }
+.corpus-card.cat-uu       { --cat-color: #38bdf8; }
+.corpus-card.cat-pp       { --cat-color: #2dd4bf; }
+.corpus-card.cat-perpres  { --cat-color: #f472b6; }
+.corpus-card.cat-permen   { --cat-color: #fb923c; }
+.corpus-card.cat-kepmen   { --cat-color: #facc15; }
+.corpus-card.cat-perda    { --cat-color: #4ade80; }
+.corpus-card.cat-lainnya  { --cat-color: #94a3b8; }
+.corpus-card { border-top: 3px solid var(--cat-color, var(--accent)); padding-top: 10px; }
+.corpus-card .cc-count { color: var(--cat-color, var(--accent)); }
+.corpus-card .cc-bar > span { background: var(--cat-color, var(--accent)); }
+.corpus-card[aria-pressed="true"] { border-color: var(--cat-color, var(--accent)); }
+.corpus-card[aria-pressed="true"]::before { color: var(--cat-color, var(--accent)); }
 
 footer {
   text-align: center;

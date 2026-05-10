@@ -22,6 +22,9 @@
 [data-font="md"] { --ans-fs: 15px;   --ans-q-fs: 17px;   --snippet-fs: 12.5px; }
 [data-font="lg"] { --ans-fs: 17px;   --ans-q-fs: 19px;   --snippet-fs: 13.5px; }
 
+/* hidden 속성이 .modal/.history-toolbar 등의 display:flex 작성자 규칙에 가려지지 않도록 강제 */
+[hidden] { display: none !important; }
+
 [data-theme="light"] {
   --bg: #f8fafc;
   --panel: #ffffff;

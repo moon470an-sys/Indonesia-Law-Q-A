@@ -326,9 +326,20 @@ function renderInline(line) {
   out = out.replace(/(?<![*\w])\*([^*\n]+?)\*(?!\w)/g, '<em>$1</em>');
   // `inline code` — Pasal 6A 같은 조항 인용을 강조하기 좋음
   out = out.replace(/`([^`]+)`/g, '<code class="ic">$1</code>');
+  // 외부 URL 자동 링크화 (인용 칩 변환 전에 해야 () 안 URL도 처리)
+  out = out.replace(/(?<![">])(https?:\/\/[^\s<)]+[^\s<.,;:!?)])/g,
+    '<a href="$1" target="_blank" rel="noopener noreferrer" class="a-link">$1</a>');
   // (Pasal X, 출처: ...) → 인용 칩
   out = out.replace(CITE_RE, '<span class="cite">$1</span>');
   return out;
+}
+
+function estimateReadingTime(text) {
+  // 한국어/인도네시아어 혼합 본문. 대충 분당 350자/200단어 기준으로 보수적 추정.
+  const t = String(text || "");
+  const chars = t.replace(/\s/g, "").length;
+  const minutes = Math.max(1, Math.round(chars / 350));
+  return { chars, minutes };
 }
 
 function isTableSeparator(line) {
@@ -575,9 +586,14 @@ function buildQaCard(item) {
         .join("")
     : "";
   const sourcesMeta = `<span class="qa-meta-item">🔎 출처 ${sources.length}건${breakdownHtml ? ` <span class="src-breakdown">${breakdownHtml}</span>` : ""}</span>`;
+  const reading = estimateReadingTime(a);
+  const readingItem = reading.chars > 50
+    ? `<span class="qa-meta-item" title="본문 ${reading.chars}자 · 예상 읽기 시간">📖 ${reading.minutes}분 (${formatCount(reading.chars)}자)</span>`
+    : "";
   const metaBits = [
     `<span class="qa-meta-item">📂 ${escapeHtml(scopeText)}</span>`,
     sourcesMeta,
+    readingItem,
     elapsed ? `<span class="qa-meta-item">⏱ ${elapsed}</span>` : "",
     ts ? `<span class="qa-meta-item qa-meta-ts" data-ts="${ts}">🕘 ${escapeHtml(formatRelativeTime(ts))}</span>` : "",
   ].filter(Boolean).join("");

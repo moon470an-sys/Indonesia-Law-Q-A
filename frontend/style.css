@@ -64,18 +64,35 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 16px 24px;
+  padding: 14px 24px;
   border-bottom: 1px solid var(--border);
-  background: var(--panel);
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--accent) 6%, var(--panel)),
+    var(--panel));
   position: sticky;
   top: 0;
   z-index: 10;
+  backdrop-filter: blur(8px);
 }
-
+.topbar::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  background: linear-gradient(180deg, var(--accent), color-mix(in srgb, var(--accent) 30%, transparent));
+}
 .topbar h1 {
   margin: 0;
   font-size: 18px;
-  font-weight: 600;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  background: linear-gradient(135deg, var(--text), color-mix(in srgb, var(--accent) 50%, var(--text)));
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
 }
 
 .status {
@@ -419,6 +436,11 @@ button.secondary:hover { border-color: var(--accent); }
   border-radius: 10px;
   padding: 18px 22px;
   position: relative;
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+.qa:hover {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+  box-shadow: 0 4px 18px -10px color-mix(in srgb, var(--accent) 50%, transparent);
 }
 .qa-head {
   display: flex;
@@ -543,6 +565,17 @@ kbd {
 }
 .qa .a li { margin: 2px 0; }
 .qa .a strong { color: var(--text); font-weight: 700; }
+.qa .a a.a-link {
+  color: var(--accent);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+  word-break: break-all;
+}
+.qa .a a.a-link:hover {
+  color: var(--accent-strong);
+  text-decoration-thickness: 2px;
+}
 .qa .a em { font-style: italic; color: var(--text); }
 .qa .a code.ic {
   background: color-mix(in srgb, var(--accent) 12%, transparent);
@@ -654,6 +687,11 @@ kbd {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  transition: border-color 160ms ease, transform 160ms ease;
+}
+.src-card:hover {
+  border-color: color-mix(in srgb, var(--cat-color, var(--accent)) 50%, var(--border));
+  transform: translateY(-1px);
 }
 .src-top {
   display: flex;

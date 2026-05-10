@@ -166,15 +166,18 @@ main {
   transform: translateY(-1px);
 }
 .corpus-card[aria-pressed="true"] {
-  border-color: var(--accent);
-  background: linear-gradient(180deg, rgba(56,189,248,0.12), var(--panel));
+  border-color: var(--cat-color, var(--accent));
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--cat-color, var(--accent)) 14%, transparent),
+    var(--panel));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--cat-color, var(--accent)) 20%, transparent) inset;
 }
 .corpus-card[aria-pressed="true"]::before {
   content: "✓";
   position: absolute;
   top: 8px;
   right: 10px;
-  color: var(--accent);
+  color: var(--cat-color, var(--accent));
   font-weight: 700;
   font-size: 12px;
 }
@@ -503,6 +506,29 @@ kbd {
 .qa-meta-item {
   font-size: 12px;
   color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.src-breakdown {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-left: 4px;
+}
+.src-mini {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  background: color-mix(in srgb, var(--cat-color, var(--accent)) 14%, transparent);
+  color: var(--cat-color, var(--accent));
+  border: 1px solid color-mix(in srgb, var(--cat-color, var(--accent)) 35%, transparent);
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 11px;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
 .qa .a {
@@ -854,4 +880,58 @@ footer {
 }
 @media (max-width: 380px) {
   .corpus-grid { grid-template-columns: repeat(2, 1fr); }
+}
+
+/* ===== 인쇄용 ===== */
+@media print {
+  :root {
+    --bg: #ffffff;
+    --panel: #ffffff;
+    --panel-2: #f5f5f5;
+    --text: #000000;
+    --muted: #555555;
+    --accent: #0066cc;
+    --border: #cccccc;
+  }
+  body { background: white; color: black; }
+  .topbar, .corpus, .settings, .examples, .ask, .history-toolbar,
+  footer, .scroll-top, .cite-tip, .qa-actions, .qa-skeleton {
+    display: none !important;
+  }
+  main { max-width: 100%; padding: 0; }
+  .qa {
+    border: 1px solid #ccc;
+    border-radius: 0;
+    page-break-inside: avoid;
+    margin-bottom: 12px;
+    box-shadow: none;
+  }
+  .qa .q { color: black; font-size: 14pt; }
+  .qa .a { font-size: 11pt; line-height: 1.55; }
+  .qa .a .cite {
+    background: transparent;
+    border: none;
+    color: #0066cc;
+    padding: 0;
+    font-weight: 600;
+  }
+  .src-list {
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  .src-card {
+    background: #fafafa;
+    border: 1px solid #ddd;
+    page-break-inside: avoid;
+  }
+  .src-snippet {
+    max-height: none;
+    overflow: visible;
+    background: white;
+    font-size: 9pt;
+  }
+  details.sources, details.sources[open] { display: block; }
+  details.sources summary { display: none; }
+  /* 페이지 브레이크 힌트 */
+  .qa + .qa { page-break-before: auto; }
 }

@@ -269,6 +269,7 @@ function renderExamples() {
     btn.addEventListener("click", () => {
       els.question.value = btn.dataset.q || "";
       els.question.focus();
+      autosizeQuestion();
     });
   });
 }
@@ -466,9 +467,26 @@ function buildQaCard(item) {
     ? scope.map((c) => COLLECTION_META[c]?.ko || c).join(", ")
     : "전체 법령";
   const elapsed = elapsedMs ? `${(elapsedMs / 1000).toFixed(1)}s` : "";
+
+  // 출처 카테고리 분포: "출처 5건 · [법률]3 [헌법]1 [정부령]1"
+  const catCounts = new Map();
+  for (const s of sources) {
+    const k = categoryKo(s.category) || "기타";
+    catCounts.set(k, (catCounts.get(k) || 0) + 1);
+  }
+  const breakdownHtml = catCounts.size
+    ? [...catCounts.entries()]
+        .sort(([, a], [, b]) => b - a)
+        .map(([k, n]) => {
+          const cls = categoryHueClass(k);
+          return `<span class="src-mini ${cls}" title="${escapeHtml(k)} ${n}건">${escapeHtml(k)} ${n}</span>`;
+        })
+        .join("")
+    : "";
+  const sourcesMeta = `<span class="qa-meta-item">🔎 출처 ${sources.length}건${breakdownHtml ? ` <span class="src-breakdown">${breakdownHtml}</span>` : ""}</span>`;
   const metaBits = [
     `<span class="qa-meta-item">📂 ${escapeHtml(scopeText)}</span>`,
-    `<span class="qa-meta-item">🔎 출처 ${sources.length}건</span>`,
+    sourcesMeta,
     elapsed ? `<span class="qa-meta-item">⏱ ${elapsed}</span>` : "",
     ts ? `<span class="qa-meta-item qa-meta-ts" data-ts="${ts}">🕘 ${escapeHtml(formatRelativeTime(ts))}</span>` : "",
   ].filter(Boolean).join("");
@@ -533,6 +551,7 @@ function buildQaCard(item) {
   wrap.querySelector(".q")?.addEventListener("click", () => {
     els.question.value = q;
     els.question.focus();
+    autosizeQuestion();
     els.question.scrollIntoView({ behavior: "smooth", block: "center" });
   });
 
@@ -756,6 +775,7 @@ async function askQuestion() {
       ts: Date.now(),
     });
     els.question.value = "";
+    autosizeQuestion();
     setStatus("답변 생성 완료", "ok");
   } catch (e) {
     skeleton.remove();
@@ -798,6 +818,15 @@ els.question.addEventListener("keydown", (e) => {
     askQuestion();
   }
 });
+
+// 질문창 자동 높이 조절 (입력 길이에 따라 늘어나도록, 최대 12줄)
+function autosizeQuestion() {
+  els.question.style.height = "auto";
+  const max = 12 * 22; // 약 12줄 분량 (line-height 보수적 추정)
+  const next = Math.min(els.question.scrollHeight, max);
+  els.question.style.height = `${next}px`;
+}
+els.question.addEventListener("input", autosizeQuestion);
 
 // 인용 칩 호버 시 떠오르는 툴팁 (전역 단일 요소)
 function showCiteTip(cite, srcCard) {

@@ -169,33 +169,51 @@ function renderItem(q, a, sources) {
   els.history.prepend(wrap);
 }
 
+async function postQueryOnce(base, q, topK) {
+  const r = await fetch(`${base}/query`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify({ question: q, top_k: topK }),
+  });
+  if (!r.ok) {
+    const text = await r.text();
+    throw new Error(`HTTP ${r.status} ${text.slice(0, 200)}`);
+  }
+  return r.json();
+}
+
 async function askQuestion() {
   const q = els.question.value.trim();
   if (!q) return;
-  const base = apiBase();
+  let base = apiBase();
   if (!base) {
     setStatus("백엔드 URL을 먼저 입력하세요", "err");
     return;
   }
+  const topK = parseInt(els.topK.value || "5", 10);
 
   els.askBtn.disabled = true;
   els.askBtn.textContent = "답변 생성 중…";
   setStatus("Claude가 헌법 문서를 검토하는 중…", "info");
 
   try {
-    const r = await fetch(`${base}/query`, {
-      method: "POST",
-      headers: authHeaders(),
-      body: JSON.stringify({
-        question: q,
-        top_k: parseInt(els.topK.value || "5", 10),
-      }),
-    });
-    if (!r.ok) {
-      const text = await r.text();
-      throw new Error(`HTTP ${r.status} ${text.slice(0, 200)}`);
+    let data;
+    try {
+      data = await postQueryOnce(base, q, topK);
+    } catch (e) {
+      // cloudflared URL이 바뀐 경우: tunnel.json refetch 후 한 번 재시도
+      const stored = localStorage.getItem(LS_KEYS.url) || "";
+      const newAuto = await fetchAutoUrl();
+      if (newAuto && newAuto !== base && (!stored || stored === base)) {
+        els.apiUrl.value = newAuto;
+        localStorage.removeItem(LS_KEYS.url);
+        setStatus(`URL 자동 갱신 (${newAuto}) 재시도 중…`, "info");
+        base = newAuto;
+        data = await postQueryOnce(base, q, topK);
+      } else {
+        throw e;
+      }
     }
-    const data = await r.json();
     renderItem(q, data.answer, data.sources || []);
     els.question.value = "";
     setStatus("답변 생성 완료", "ok");

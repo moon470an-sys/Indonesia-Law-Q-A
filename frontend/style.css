@@ -630,8 +630,16 @@ kbd {
   font-size: var(--ans-fs);
   line-height: 1.65;
 }
-.qa .a p { margin: 0 0 10px; }
+.qa .a p {
+  margin: 0 0 10px;
+  padding: 0 2px;
+  border-radius: 4px;
+  transition: background 160ms ease;
+}
 .qa .a p:last-child { margin-bottom: 0; }
+.qa .a p:hover {
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+}
 .qa .a ul, .qa .a ol {
   margin: 6px 0 12px;
   padding-left: 22px;
@@ -926,6 +934,13 @@ kbd {
   border-color: var(--accent-strong);
   border-style: dashed;
 }
+.qa-progress {
+  color: var(--accent);
+  font-weight: 600;
+}
+.qa-progress-stage {
+  transition: opacity 200ms ease;
+}
 .skeleton-line {
   height: 14px;
   margin: 8px 0;
@@ -1159,6 +1174,57 @@ body.modal-open { overflow: hidden; }
   font-weight: 700;
 }
 
+.cite-chart {
+  margin-top: 12px;
+  padding: 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.cite-chart-head {
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+.cite-bar-row {
+  display: grid;
+  grid-template-columns: 78px 1fr 60px;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+}
+.cite-bar-name {
+  color: var(--cat-color, var(--accent));
+  font-weight: 600;
+  white-space: nowrap;
+}
+.cite-bar-track {
+  height: 8px;
+  background: var(--panel);
+  border-radius: 4px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.cite-bar-fill {
+  display: block;
+  height: 100%;
+  background: var(--cat-color, var(--accent));
+  border-radius: 3px;
+}
+.cite-bar-num {
+  color: var(--text);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+.cite-bar-pct { color: var(--muted); font-weight: 400; }
+
 .legend-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
@@ -1307,6 +1373,8 @@ body.modal-open { overflow: hidden; }
   .legend-grid { grid-template-columns: repeat(2, 1fr); }
   .stats-grid { grid-template-columns: repeat(2, 1fr); }
   .stat-val { font-size: 18px; }
+  .cite-bar-row { grid-template-columns: 64px 1fr 50px; gap: 6px; }
+  .cite-bar-pct { display: none; }
 }
 @media (max-width: 380px) {
   .corpus-grid { grid-template-columns: repeat(2, 1fr); }

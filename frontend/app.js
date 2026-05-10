@@ -984,7 +984,7 @@ function makeSkeletonCard(q, scope) {
     <h3 class="q">Q. ${escapeHtml(q)}</h3>
     <div class="qa-meta">
       <span class="qa-meta-item">📂 ${escapeHtml(scopeText)}</span>
-      <span class="qa-meta-item">⏳ Claude가 답변 생성 중…</span>
+      <span class="qa-meta-item qa-progress">⏳ <span class="qa-progress-stage">벡터 검색 중…</span></span>
     </div>
     <div class="a">
       <div class="skeleton-line" style="width: 96%"></div>
@@ -994,6 +994,25 @@ function makeSkeletonCard(q, scope) {
       <div class="skeleton-line" style="width: 60%"></div>
     </div>`;
   return wrap;
+}
+
+// 응답 대기 동안 단계 메시지를 점진적으로 갱신 (실제 백엔드는 streaming 안 함 — UX feedback용)
+function startProgressStages(skeleton) {
+  const stageEl = skeleton.querySelector(".qa-progress-stage");
+  if (!stageEl) return () => {};
+  // 시간대별 메시지: 초기 검색, 그 다음 LLM 생성, 그 다음 길어지면 안내
+  const stages = [
+    { at: 0,    text: "벡터 검색 중…" },
+    { at: 2000, text: "관련 조항 정리 중…" },
+    { at: 3500, text: "Claude가 답변 생성 중…" },
+    { at: 15000, text: "Claude가 답변 생성 중… (긴 답변일 수 있어요)" },
+    { at: 30000, text: "응답 지연 — 잠시만 기다려주세요…" },
+  ];
+  const timers = [];
+  for (const s of stages.slice(1)) {
+    timers.push(setTimeout(() => { stageEl.textContent = s.text; }, s.at));
+  }
+  return () => timers.forEach((t) => clearTimeout(t));
 }
 
 async function postQueryOnce(base, q, topK) {
@@ -1031,10 +1050,11 @@ async function askQuestion() {
   const t0 = performance.now();
   const scope = [...selectedCategories];
 
-  // 빈 상태 제거하고 스켈레톤 prepend
+  // 빈 상태 제거하고 스켈레톤 prepend + 단계 메시지 시작
   if (els.history.querySelector(".empty-state")) els.history.innerHTML = "";
   const skeleton = makeSkeletonCard(q, scope);
   els.history.prepend(skeleton);
+  const stopStages = startProgressStages(skeleton);
 
   try {
     let data;
@@ -1054,6 +1074,7 @@ async function askQuestion() {
       }
     }
     const elapsedMs = performance.now() - t0;
+    stopStages();
     skeleton.remove();
     addHistoryItem({
       id: `qa_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
@@ -1068,6 +1089,7 @@ async function askQuestion() {
     autosizeQuestion();
     setStatus("답변 생성 완료", "ok");
   } catch (e) {
+    stopStages();
     skeleton.remove();
     if (!historyItems.length) renderHistoryEmpty();
     setStatus(`요청 실패: ${e.message}`, "err");
@@ -1182,6 +1204,33 @@ function renderUsageStats() {
     <div class="stat-cell"><div class="stat-label">가장 자주 인용된 분류</div><div class="stat-val stat-val-sm">${topCitedHtml}</div></div>
     <div class="stat-cell"><div class="stat-label">가장 많이 범위 지정한 분류</div><div class="stat-val stat-val-sm">${topAskedHtml}</div></div>
   `;
+
+  // 카테고리 인용 분포 미니 차트 — stat-grid 아래에 별도 행으로 삽입
+  const totalCites = [...st.catCounts.values()].reduce((a, b) => a + b, 0);
+  if (totalCites > 0) {
+    const chartRows = [...st.catCounts.entries()]
+      .sort(([, a], [, b]) => b - a)
+      .map(([k, n]) => {
+        const pct = Math.max(1, Math.round((n / totalCites) * 100));
+        const cls = categoryHueClass(k);
+        return `<div class="cite-bar-row ${cls}">
+          <span class="cite-bar-name">${escapeHtml(k)}</span>
+          <span class="cite-bar-track"><span class="cite-bar-fill" style="width:${pct}%"></span></span>
+          <span class="cite-bar-num">${n}<span class="cite-bar-pct"> (${pct}%)</span></span>
+        </div>`;
+      })
+      .join("");
+    const chartHtml = `<div class="cite-chart">
+      <div class="cite-chart-head">인용된 분류 분포</div>
+      ${chartRows}
+    </div>`;
+    els.statsGrid.insertAdjacentHTML("afterend", chartHtml);
+    // 이미 존재하면 제거 — afterend는 매번 새로 추가하니까 이전 차트 제거
+    const allCharts = els.statsSection.querySelectorAll(".cite-chart");
+    if (allCharts.length > 1) {
+      for (let i = 0; i < allCharts.length - 1; i++) allCharts[i].remove();
+    }
+  }
 }
 
 // 본문 폰트 사이즈 (0=작게, 1=기본, 2=크게)
@@ -1424,9 +1473,11 @@ els.corpusSelectNone?.addEventListener("click", () => {
   updateScopeIndicator();
 });
 
-// 히스토리 검색 (디바운싱 없이 단순 즉시 필터)
+// 히스토리 검색 — 250ms 디바운싱 (TreeWalker 하이라이트 비용 줄임)
+let searchDebounce = 0;
 els.historySearch?.addEventListener("input", () => {
-  applyHistoryFilter();
+  clearTimeout(searchDebounce);
+  searchDebounce = setTimeout(() => applyHistoryFilter(), 250);
 });
 
 // 정렬 변경 → 전체 재렌더 (sort는 latest/oldest/elapsed 기반, 데이터 변경 없음)

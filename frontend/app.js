@@ -319,17 +319,22 @@ function renderInline(line) {
   let out = escapeHtml(line);
   // **bold**
   out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  // *italic* (단일 별표, **bold** 매칭 후 남은 것)
+  out = out.replace(/(?<![*\w])\*([^*\n]+?)\*(?!\w)/g, '<em>$1</em>');
+  // `inline code` — Pasal 6A 같은 조항 인용을 강조하기 좋음
+  out = out.replace(/`([^`]+)`/g, '<code class="ic">$1</code>');
   // (Pasal X, 출처: ...) → 인용 칩
   out = out.replace(CITE_RE, '<span class="cite">$1</span>');
   return out;
 }
 
 function renderAnswer(answer) {
-  // Claude 출력 마크다운 일부를 렌더링: 볼드, 순서/비순서 리스트, 헤딩, 단락.
+  // Claude 출력 마크다운 일부 렌더링: 볼드/이탤릭/인라인코드/리스트/헤딩/blockquote/단락.
   const lines = String(answer || "").replace(/\r\n/g, "\n").split("\n");
   const blocks = [];
   let buf = [];
-  let listType = null; // "ul" | "ol" | null
+  let mode = null; // "ul" | "ol" | "bq" | null
+
   const flushPara = () => {
     if (buf.length) {
       blocks.push(`<p>${buf.map(renderInline).join("<br>")}</p>`);
@@ -337,16 +342,24 @@ function renderAnswer(answer) {
     }
   };
   const flushList = () => {
-    if (listType && buf.length) {
+    if (buf.length) {
+      const tag = mode;
       const items = buf.map((t) => `<li>${renderInline(t)}</li>`).join("");
-      blocks.push(`<${listType}>${items}</${listType}>`);
+      blocks.push(`<${tag}>${items}</${tag}>`);
     }
     buf = [];
-    listType = null;
+  };
+  const flushBq = () => {
+    if (buf.length) {
+      blocks.push(`<blockquote class="a-bq">${buf.map(renderInline).join("<br>")}</blockquote>`);
+    }
+    buf = [];
   };
   const flush = () => {
-    if (listType) flushList();
+    if (mode === "ul" || mode === "ol") flushList();
+    else if (mode === "bq") flushBq();
     else flushPara();
+    mode = null;
   };
 
   for (const raw of lines) {
@@ -358,27 +371,34 @@ function renderAnswer(answer) {
     const ulM = line.match(/^\s*[-*]\s+(.+)$/);
     const olM = line.match(/^\s*\d+\.\s+(.+)$/);
     const hM = line.match(/^\s*(#{1,3})\s+(.+)$/);
+    const bqM = line.match(/^\s*>\s?(.*)$/);
 
     if (hM) {
       flush();
-      const level = Math.min(hM[1].length + 2, 4); // ## → h4 등 너무 크지 않게
+      const level = Math.min(hM[1].length + 2, 4);
       blocks.push(`<h${level} class="a-h">${renderInline(hM[2])}</h${level}>`);
       continue;
     }
+    if (bqM) {
+      if (mode !== "bq") flush();
+      mode = "bq";
+      buf.push(bqM[1]);
+      continue;
+    }
     if (ulM) {
-      if (listType !== "ul") flush();
-      listType = "ul";
+      if (mode !== "ul") flush();
+      mode = "ul";
       buf.push(ulM[1]);
       continue;
     }
     if (olM) {
-      if (listType !== "ol") flush();
-      listType = "ol";
+      if (mode !== "ol") flush();
+      mode = "ol";
       buf.push(olM[1]);
       continue;
     }
     // 일반 단락 라인
-    if (listType) flushList();
+    if (mode === "ul" || mode === "ol" || mode === "bq") flush();
     buf.push(line);
   }
   flush();
@@ -427,7 +447,7 @@ function renderSource(s, i) {
   const catKo = categoryKo(cat);
   const hueCls = categoryHueClass(cat);
   return `
-    <li class="src-card ${hueCls}">
+    <li class="src-card ${hueCls}" data-cat="${escapeHtml(catKo)}">
       <header class="src-top">
         <span class="src-idx">#${i + 1}</span>
         ${catKo ? `<span class="src-cat">${escapeHtml(catKo)}</span>` : ""}
@@ -444,6 +464,24 @@ function renderSource(s, i) {
       </div>
       <pre class="src-snippet">${escapeHtml(s.snippet || "")}</pre>
     </li>`;
+}
+
+function buildSourceFilters(sources) {
+  // 출처가 2개 이상의 카테고리에 분포할 때만 필터 칩 노출.
+  const cats = new Map(); // catKo → count
+  for (const s of sources) {
+    const k = categoryKo(s.category) || "기타";
+    cats.set(k, (cats.get(k) || 0) + 1);
+  }
+  if (cats.size < 2) return "";
+  const chips = [...cats.entries()]
+    .sort(([, a], [, b]) => b - a)
+    .map(([k, n]) => {
+      const cls = categoryHueClass(k);
+      return `<button type="button" class="src-filter ${cls}" data-cat="${escapeHtml(k)}" aria-pressed="true">${escapeHtml(k)} <span class="src-filter-n">${n}</span></button>`;
+    })
+    .join("");
+  return `<div class="src-filters">${chips}</div>`;
 }
 
 function formatRelativeTime(ts) {
@@ -503,6 +541,7 @@ function buildQaCard(item) {
     <div class="a">${renderAnswer(a)}</div>
     <details class="sources" ${sources.length ? "open" : ""}>
       <summary>🔎 검색된 출처 ${sources.length}건</summary>
+      ${buildSourceFilters(sources)}
       <ul class="src-list">${srcHtml}</ul>
     </details>
   `;
@@ -554,6 +593,29 @@ function buildQaCard(item) {
     autosizeQuestion();
     els.question.scrollIntoView({ behavior: "smooth", block: "center" });
   });
+
+  // 출처 카테고리 필터 칩 (Q&A별)
+  const filterBtns = wrap.querySelectorAll(".src-filter");
+  if (filterBtns.length) {
+    const applyFilter = () => {
+      const enabled = new Set(
+        [...filterBtns]
+          .filter((b) => b.getAttribute("aria-pressed") !== "false")
+          .map((b) => b.dataset.cat)
+      );
+      wrap.querySelectorAll(".src-card").forEach((card) => {
+        const c = card.dataset.cat || "";
+        card.hidden = enabled.size === 0 ? false : !enabled.has(c);
+      });
+    };
+    filterBtns.forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const cur = btn.getAttribute("aria-pressed") !== "false";
+        btn.setAttribute("aria-pressed", cur ? "false" : "true");
+        applyFilter();
+      });
+    });
+  }
 
   // 답변 복사 버튼
   const copyBtn = wrap.querySelector(".qa-copy");
@@ -667,18 +729,75 @@ function updateHistoryToolbar() {
   }
 }
 
+function escapeRegex(s) {
+  return String(s || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function clearSearchHighlights(rootEl) {
+  rootEl.querySelectorAll("mark.search-mark").forEach((mark) => {
+    const text = document.createTextNode(mark.textContent);
+    mark.parentNode.replaceChild(text, mark);
+  });
+  rootEl.normalize();
+}
+
+function highlightTextIn(rootEl, query) {
+  if (!query) return;
+  const re = new RegExp(escapeRegex(query), "gi");
+  // 검색 대상 영역만 (스니펫은 너무 무거우니 제외, q + a + src-name + src-article만)
+  const targets = rootEl.querySelectorAll(".q, .a, .src-name, .src-article");
+  for (const t of targets) {
+    const walker = document.createTreeWalker(t, NodeFilter.SHOW_TEXT, {
+      acceptNode: (n) => {
+        if (!n.nodeValue) return NodeFilter.FILTER_REJECT;
+        // mark 안에 다시 매칭되지 않도록
+        if (n.parentNode && n.parentNode.nodeName === "MARK") return NodeFilter.FILTER_REJECT;
+        return re.test(n.nodeValue) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+      },
+    });
+    const nodes = [];
+    let n;
+    while ((n = walker.nextNode())) nodes.push(n);
+    for (const node of nodes) {
+      const frag = document.createDocumentFragment();
+      const text = node.nodeValue;
+      let lastIdx = 0;
+      let m;
+      re.lastIndex = 0;
+      while ((m = re.exec(text)) !== null) {
+        if (m.index > lastIdx) frag.appendChild(document.createTextNode(text.slice(lastIdx, m.index)));
+        const mark = document.createElement("mark");
+        mark.className = "search-mark";
+        mark.textContent = m[0];
+        frag.appendChild(mark);
+        lastIdx = m.index + m[0].length;
+        if (m.index === re.lastIndex) re.lastIndex++; // 빈 매칭 무한루프 방지
+      }
+      if (lastIdx < text.length) frag.appendChild(document.createTextNode(text.slice(lastIdx)));
+      node.parentNode.replaceChild(frag, node);
+    }
+  }
+}
+
 function applyHistoryFilter() {
   if (!els.historySearch) return;
-  const q = (els.historySearch.value || "").trim().toLowerCase();
+  const q = (els.historySearch.value || "").trim();
+  const qLower = q.toLowerCase();
   const cards = els.history.querySelectorAll(".qa");
-  if (!q) {
+
+  // 모든 카드의 기존 하이라이트 먼저 제거
+  cards.forEach((c) => clearSearchHighlights(c));
+
+  if (!qLower) {
     cards.forEach((c) => { c.hidden = false; });
     updateHistoryToolbar();
     return;
   }
   cards.forEach((card) => {
     const text = card.textContent.toLowerCase();
-    card.hidden = !text.includes(q);
+    const match = text.includes(qLower);
+    card.hidden = !match;
+    if (match) highlightTextIn(card, q);
   });
   updateHistoryToolbar();
 }

@@ -22,6 +22,7 @@ const els = {
   corpus: document.getElementById("corpus"),
   corpusGrid: document.getElementById("corpusGrid"),
   corpusTotal: document.getElementById("corpusTotal"),
+  exampleChips: document.getElementById("exampleChips"),
 };
 
 // indonesia_* 컬렉션명 → 한국어 표시명 + 약어 매핑.
@@ -47,6 +48,39 @@ const COLLECTION_ORDER = [
 ];
 
 const selectedCategories = new Set(); // 사용자가 클릭으로 선택한 컬렉션명들
+
+// 카테고리별 큐레이션 예시 질문. cats가 비어있으면 항상 표시 (전체).
+const EXAMPLE_QUESTIONS = [
+  // 헌법
+  { label: "대통령의 권한", q: "인도네시아 헌법에서 대통령의 권한은 무엇인가?", cats: ["indonesia_constitution"] },
+  { label: "국민 기본권", q: "인도네시아 헌법상 국민의 기본권은 어떻게 규정되어 있는가?", cats: ["indonesia_constitution"] },
+  { label: "의회 구성 (MPR/DPR/DPD)", q: "인도네시아 의회(MPR, DPR, DPD)의 구성과 역할은?", cats: ["indonesia_constitution"] },
+  { label: "헌법 개정 절차", q: "인도네시아 헌법 개정 절차는 어떻게 되는가?", cats: ["indonesia_constitution"] },
+  // 법률 UU
+  { label: "노동법 주요 내용", q: "인도네시아 노동법(UU 13/2003)의 주요 내용은?", cats: ["indonesia_uu"] },
+  { label: "PT 회사 설립 요건", q: "회사법상 유한책임회사(PT) 설립 요건과 절차는?", cats: ["indonesia_uu"] },
+  { label: "외국인투자법", q: "외국인투자법(UU Penanaman Modal)의 주요 규정은?", cats: ["indonesia_uu"] },
+  { label: "조세 일반규정", q: "조세일반규정법(KUP)에서 납세자의 권리와 의무는?", cats: ["indonesia_uu"] },
+  // 정부령 PP
+  { label: "환경영향평가(AMDAL)", q: "환경영향평가(AMDAL)의 절차와 대상 사업은?", cats: ["indonesia_pp"] },
+  { label: "토지수용 절차", q: "공익을 위한 토지수용 절차에 관한 정부령은 무엇이 있는가?", cats: ["indonesia_pp"] },
+  // 대통령령 Perpres
+  { label: "외국인근로자 채용", q: "외국인근로자(TKA) 채용에 관한 대통령령의 주요 내용은?", cats: ["indonesia_perpres"] },
+  { label: "부동산 외국인 소유", q: "외국인의 부동산 소유에 관한 대통령령은?", cats: ["indonesia_perpres"] },
+  // 장관령 Permen
+  { label: "산업안전보건", q: "산업안전보건 관련 노동부 장관령의 주요 규정은?", cats: ["indonesia_permen"] },
+  { label: "수입 라이선스(API)", q: "수입업자 식별번호(API) 발급 요건은?", cats: ["indonesia_permen"] },
+  { label: "할랄 인증 절차", q: "할랄 인증 의무 대상 품목과 인증 절차는?", cats: ["indonesia_permen"] },
+  // 장관결정 Kepmen
+  { label: "최저임금 결정", q: "주별 최저임금(UMP) 결정 절차와 기준은?", cats: ["indonesia_kepmen"] },
+  // 지방조례 Perda
+  { label: "사업 인허가 (자카르타)", q: "자카르타 특별주에서 사업 인허가 관련 조례는?", cats: ["indonesia_perda"] },
+  // 기타
+  { label: "대통령훈령 효력", q: "대통령훈령(Inpres)의 법적 효력과 위계는?", cats: ["indonesia_lainnya"] },
+  // 일반 (전체 범위)
+  { label: "법령 위계", q: "인도네시아 법령의 위계(헌법 > 법률 > 정부령 ...)와 충돌 시 우선순위는?", cats: [] },
+  { label: "외국인 사업 형태", q: "외국인이 인도네시아에서 사업할 때 가능한 법적 형태(PT PMA, 대표사무소 등)는?", cats: [] },
+];
 
 function formatCount(n) {
   return Number(n || 0).toLocaleString("ko-KR");
@@ -198,6 +232,35 @@ function updateScopeIndicator() {
       .join(", ");
     els.question.placeholder = `[${names}] 범위에서 질문하세요…`;
   }
+  renderExamples();
+}
+
+function renderExamples() {
+  if (!els.exampleChips) return;
+  let visible;
+  if (!selectedCategories.size) {
+    // 전체 표시 (모든 카테고리 + 일반)
+    visible = EXAMPLE_QUESTIONS;
+  } else {
+    // 선택된 카테고리에 매칭 + 일반(cats:[])도 포함
+    visible = EXAMPLE_QUESTIONS.filter((ex) => {
+      if (!ex.cats.length) return true;
+      return ex.cats.some((c) => selectedCategories.has(c));
+    });
+  }
+  els.exampleChips.innerHTML = visible
+    .map((ex) => {
+      const cat = ex.cats[0]; // 첫 번째 카테고리로 색상 부여 (일반은 색 없음)
+      const hueCls = cat ? categoryHueClass(cat) : "";
+      return `<button class="chip ${hueCls}" data-q="${escapeHtml(ex.q)}">${escapeHtml(ex.label)}</button>`;
+    })
+    .join("");
+  els.exampleChips.querySelectorAll(".chip").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      els.question.value = btn.dataset.q || "";
+      els.question.focus();
+    });
+  });
 }
 
 async function checkHealth() {
@@ -402,8 +465,11 @@ function buildQaCard(item) {
 
   wrap.innerHTML = `
     <header class="qa-head">
-      <h3 class="q">Q. ${escapeHtml(q)}</h3>
-      <button class="qa-del" type="button" aria-label="이 질문 삭제" title="삭제">✕</button>
+      <h3 class="q" title="클릭 → 입력창에 다시 채우기">Q. ${escapeHtml(q)}</h3>
+      <div class="qa-actions">
+        <button class="qa-copy" type="button" aria-label="답변 복사" title="답변을 클립보드에 복사">📋 복사</button>
+        <button class="qa-del" type="button" aria-label="이 질문 삭제" title="삭제">✕</button>
+      </div>
     </header>
     <div class="qa-meta">${metaBits}</div>
     <div class="a">${renderAnswer(a)}</div>
@@ -445,6 +511,36 @@ function buildQaCard(item) {
   wrap.querySelector(".qa-del")?.addEventListener("click", () => {
     deleteHistoryItem(id);
   });
+
+  // Q 클릭 → 입력창에 다시 채우기
+  wrap.querySelector(".q")?.addEventListener("click", () => {
+    els.question.value = q;
+    els.question.focus();
+    els.question.scrollIntoView({ behavior: "smooth", block: "center" });
+  });
+
+  // 답변 복사 버튼
+  const copyBtn = wrap.querySelector(".qa-copy");
+  if (copyBtn) {
+    copyBtn.addEventListener("click", async () => {
+      const sourceLines = sources.map((s, i) =>
+        `[${i + 1}] ${categoryKo(s.category) || ""} · ${s.source} · p.${s.page} · ${s.article || ""} (유사도 ${(s.score || 0).toFixed(2)})`
+      ).join("\n");
+      const fullText = `Q. ${q}\n\n${a}\n\n— 출처 —\n${sourceLines}`;
+      const original = copyBtn.textContent;
+      try {
+        await navigator.clipboard.writeText(fullText);
+        copyBtn.textContent = "✅ 복사됨";
+        copyBtn.classList.add("copied");
+      } catch {
+        copyBtn.textContent = "❌ 실패";
+      }
+      setTimeout(() => {
+        copyBtn.textContent = original;
+        copyBtn.classList.remove("copied");
+      }, 1600);
+    });
+  }
 
   return wrap;
 }
@@ -613,11 +709,21 @@ async function askQuestion() {
   }
 }
 
-document.querySelectorAll(".chip").forEach((btn) => {
-  btn.addEventListener("click", () => {
-    els.question.value = btn.dataset.q || "";
+// 키보드 단축키: Ctrl/Cmd+K → 질문 입력창 포커스, Esc → 입력 비우기 (포커스 시)
+document.addEventListener("keydown", (e) => {
+  const isInput = ["INPUT", "TEXTAREA"].includes(document.activeElement?.tagName);
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+    e.preventDefault();
     els.question.focus();
-  });
+    els.question.select();
+    return;
+  }
+  if (e.key === "Escape" && document.activeElement === els.question) {
+    if (els.question.value) {
+      els.question.value = "";
+      e.preventDefault();
+    }
+  }
 });
 
 els.saveBtn.addEventListener("click", saveSettings);
@@ -638,6 +744,7 @@ els.question.addEventListener("keydown", (e) => {
 // 페이지 로드 시 저장된 히스토리 즉시 복원, 그 후 백엔드 헬스체크.
 historyItems = loadHistoryItems();
 renderHistoryAll();
+renderExamples(); // 초기 chip 렌더 (헬스체크 응답 전에도 보이도록)
 loadSettings().then(() => checkHealth());
 
 // 히스토리에 표시된 상대시간(NN분 전)을 1분마다 갱신.

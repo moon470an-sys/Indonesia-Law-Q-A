@@ -22,7 +22,12 @@ const els = {
   corpus: document.getElementById("corpus"),
   corpusGrid: document.getElementById("corpusGrid"),
   corpusTotal: document.getElementById("corpusTotal"),
+  corpusSelectAll: document.getElementById("corpusSelectAll"),
+  corpusSelectNone: document.getElementById("corpusSelectNone"),
   exampleChips: document.getElementById("exampleChips"),
+  historyToolbar: document.getElementById("historyToolbar"),
+  historySearch: document.getElementById("historySearch"),
+  historyCount: document.getElementById("historyCount"),
 };
 
 // indonesia_* 컬렉션명 → 한국어 표시명 + 약어 매핑.
@@ -576,11 +581,14 @@ function renderHistoryAll() {
   els.history.innerHTML = "";
   if (!historyItems.length) {
     renderHistoryEmpty();
+    updateHistoryToolbar();
     return;
   }
   for (const item of historyItems) {
     els.history.appendChild(buildQaCard(item));
   }
+  applyHistoryFilter();
+  updateHistoryToolbar();
 }
 
 function addHistoryItem(item) {
@@ -590,6 +598,8 @@ function addHistoryItem(item) {
   // 빈 상태 표시 제거 후 카드 prepend
   if (els.history.querySelector(".empty-state")) els.history.innerHTML = "";
   els.history.prepend(buildQaCard(item));
+  applyHistoryFilter();
+  updateHistoryToolbar();
 }
 
 function deleteHistoryItem(id) {
@@ -598,12 +608,48 @@ function deleteHistoryItem(id) {
   const card = els.history.querySelector(`[data-id="${CSS.escape(id)}"]`);
   if (card) card.remove();
   if (!historyItems.length) renderHistoryEmpty();
+  applyHistoryFilter();
+  updateHistoryToolbar();
 }
 
 function clearAllHistory() {
   historyItems = [];
   saveHistoryItems(historyItems);
   renderHistoryEmpty();
+  if (els.historySearch) els.historySearch.value = "";
+  updateHistoryToolbar();
+}
+
+function updateHistoryToolbar() {
+  if (!els.historyToolbar) return;
+  if (historyItems.length === 0) {
+    els.historyToolbar.hidden = true;
+    return;
+  }
+  els.historyToolbar.hidden = false;
+  const q = (els.historySearch?.value || "").trim();
+  if (!q) {
+    els.historyCount.textContent = `총 ${historyItems.length}개 저장됨`;
+  } else {
+    const visible = els.history.querySelectorAll(".qa:not([hidden])").length;
+    els.historyCount.textContent = `${visible} / ${historyItems.length}개 일치`;
+  }
+}
+
+function applyHistoryFilter() {
+  if (!els.historySearch) return;
+  const q = (els.historySearch.value || "").trim().toLowerCase();
+  const cards = els.history.querySelectorAll(".qa");
+  if (!q) {
+    cards.forEach((c) => { c.hidden = false; });
+    updateHistoryToolbar();
+    return;
+  }
+  cards.forEach((card) => {
+    const text = card.textContent.toLowerCase();
+    card.hidden = !text.includes(q);
+  });
+  updateHistoryToolbar();
 }
 
 // 로딩 스켈레톤: askQuestion 동안 임시 카드 표시
@@ -739,6 +785,31 @@ els.question.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
     askQuestion();
   }
+});
+
+// 코퍼스 전체 / 해제 버튼
+els.corpusSelectAll?.addEventListener("click", () => {
+  const cards = els.corpusGrid.querySelectorAll(".corpus-card");
+  cards.forEach((card) => {
+    const name = card.dataset.col;
+    if (name) {
+      selectedCategories.add(name);
+      card.setAttribute("aria-pressed", "true");
+    }
+  });
+  updateScopeIndicator();
+});
+els.corpusSelectNone?.addEventListener("click", () => {
+  selectedCategories.clear();
+  els.corpusGrid.querySelectorAll(".corpus-card").forEach((card) => {
+    card.setAttribute("aria-pressed", "false");
+  });
+  updateScopeIndicator();
+});
+
+// 히스토리 검색 (디바운싱 없이 단순 즉시 필터)
+els.historySearch?.addEventListener("input", () => {
+  applyHistoryFilter();
 });
 
 // 페이지 로드 시 저장된 히스토리 즉시 복원, 그 후 백엔드 헬스체크.

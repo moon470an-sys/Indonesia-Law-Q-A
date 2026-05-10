@@ -16,7 +16,14 @@
     <section class="corpus" id="corpus" hidden>
       <div class="corpus-head">
         <h2>📚 인덱싱된 법령 코퍼스</h2>
-        <span class="corpus-total" id="corpusTotal">—</span>
+        <div class="corpus-head-right">
+          <span class="corpus-total" id="corpusTotal">—</span>
+          <div class="corpus-quick">
+            <button id="corpusSelectAll" class="link-btn" type="button" title="모든 카테고리 선택">전체</button>
+            <span class="sep">·</span>
+            <button id="corpusSelectNone" class="link-btn" type="button" title="선택 해제">해제</button>
+          </div>
+        </div>
       </div>
       <div class="corpus-grid" id="corpusGrid"></div>
       <p class="hint">카드를 클릭하면 해당 법령 종류로 검색 범위가 한정됩니다 (다중 선택 가능, 다시 클릭하면 해제).</p>
@@ -54,13 +61,18 @@
       <div class="example-chips" id="exampleChips"></div>
     </section>
 
-    <section class="ask">
+    <section class="ask" id="ask">
       <textarea id="question" rows="3" placeholder="인도네시아 법령에 관해 질문하세요…"></textarea>
       <div class="row">
         <button id="askBtn" class="primary">질문하기</button>
         <button id="clearBtn" class="secondary">대화 초기화</button>
-        <span class="kbd-hint" aria-hidden="true"><kbd>Ctrl</kbd>+<kbd>Enter</kbd> 로 빠른 전송</span>
+        <span class="kbd-hint" aria-hidden="true"><kbd>Ctrl</kbd>+<kbd>Enter</kbd> 로 빠른 전송 · <kbd>Ctrl</kbd>+<kbd>K</kbd> 로 포커스</span>
       </div>
+    </section>
+
+    <section class="history-toolbar" id="historyToolbar" hidden>
+      <input type="search" id="historySearch" placeholder="저장된 질문/답변에서 검색…" aria-label="히스토리 검색" />
+      <span class="history-count" id="historyCount"></span>
     </section>
 
     <section id="history" class="history"></section>

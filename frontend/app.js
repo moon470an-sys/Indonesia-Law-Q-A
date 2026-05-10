@@ -4,7 +4,9 @@ const LS_KEYS = {
   url: "rag.apiUrl",
   token: "rag.apiToken",
   topK: "rag.topK",
+  history: "rag.history",
 };
+const HISTORY_LIMIT = 30;
 
 const els = {
   apiUrl: document.getElementById("apiUrl"),
@@ -370,31 +372,165 @@ function renderSource(s, i) {
     </li>`;
 }
 
-function renderItem(q, a, sources, meta) {
+function formatRelativeTime(ts) {
+  if (!ts) return "";
+  const diff = Date.now() - ts;
+  if (diff < 60_000) return "방금 전";
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}분 전`;
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}시간 전`;
+  const d = new Date(ts);
+  return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+function buildQaCard(item) {
+  const { q, a, sources = [], scope = [], elapsedMs, ts, id } = item;
   const wrap = document.createElement("article");
   wrap.className = "qa";
-  const srcHtml = (sources || []).map(renderSource).join("");
+  wrap.dataset.id = id;
+  const srcHtml = sources.map(renderSource).join("");
 
-  const scopeText = meta?.scope?.length
-    ? meta.scope.map((c) => COLLECTION_META[c]?.ko || c).join(", ")
+  const scopeText = scope.length
+    ? scope.map((c) => COLLECTION_META[c]?.ko || c).join(", ")
     : "전체 법령";
-  const elapsed = meta?.elapsedMs ? `${(meta.elapsedMs / 1000).toFixed(1)}s` : "";
+  const elapsed = elapsedMs ? `${(elapsedMs / 1000).toFixed(1)}s` : "";
   const metaBits = [
     `<span class="qa-meta-item">📂 ${escapeHtml(scopeText)}</span>`,
-    `<span class="qa-meta-item">🔎 출처 ${sources?.length || 0}건</span>`,
+    `<span class="qa-meta-item">🔎 출처 ${sources.length}건</span>`,
     elapsed ? `<span class="qa-meta-item">⏱ ${elapsed}</span>` : "",
+    ts ? `<span class="qa-meta-item qa-meta-ts" data-ts="${ts}">🕘 ${escapeHtml(formatRelativeTime(ts))}</span>` : "",
   ].filter(Boolean).join("");
 
   wrap.innerHTML = `
-    <h3 class="q">Q. ${escapeHtml(q)}</h3>
+    <header class="qa-head">
+      <h3 class="q">Q. ${escapeHtml(q)}</h3>
+      <button class="qa-del" type="button" aria-label="이 질문 삭제" title="삭제">✕</button>
+    </header>
     <div class="qa-meta">${metaBits}</div>
     <div class="a">${renderAnswer(a)}</div>
-    <details class="sources" ${sources?.length ? "open" : ""}>
-      <summary>🔎 검색된 출처 ${sources?.length || 0}건</summary>
+    <details class="sources" ${sources.length ? "open" : ""}>
+      <summary>🔎 검색된 출처 ${sources.length}건</summary>
       <ul class="src-list">${srcHtml}</ul>
     </details>
   `;
-  els.history.prepend(wrap);
+
+  // 인용 칩 → 동일 카드 내 매칭되는 출처로 점프
+  wrap.querySelectorAll(".cite").forEach((cite) => {
+    cite.style.cursor = "pointer";
+    cite.title = "클릭 → 매칭 출처로 이동";
+    cite.addEventListener("click", () => {
+      const text = cite.textContent || "";
+      const filenameMatch = text.match(/출처:\s*([^,)]+)/);
+      const fname = filenameMatch ? filenameMatch[1].trim() : "";
+      if (!fname) return;
+      const cards = wrap.querySelectorAll(".src-card");
+      let target = null;
+      for (const card of cards) {
+        const name = card.querySelector(".src-name")?.title || card.querySelector(".src-name")?.textContent || "";
+        if (name && (name.includes(fname) || fname.includes(name.replace(/…/, "")))) {
+          target = card;
+          break;
+        }
+      }
+      if (!target) return;
+      const details = wrap.querySelector("details.sources");
+      if (details && !details.open) details.open = true;
+      target.scrollIntoView({ behavior: "smooth", block: "center" });
+      target.classList.remove("pulse");
+      void target.offsetWidth; // reflow → 애니 재시작
+      target.classList.add("pulse");
+    });
+  });
+
+  // 삭제 버튼
+  wrap.querySelector(".qa-del")?.addEventListener("click", () => {
+    deleteHistoryItem(id);
+  });
+
+  return wrap;
+}
+
+function loadHistoryItems() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(LS_KEYS.history) || "[]");
+    if (!Array.isArray(raw)) return [];
+    return raw;
+  } catch { return []; }
+}
+
+function saveHistoryItems(items) {
+  try {
+    localStorage.setItem(LS_KEYS.history, JSON.stringify(items.slice(0, HISTORY_LIMIT)));
+  } catch { /* quota exceeded — silently drop */ }
+}
+
+let historyItems = [];
+
+function renderHistoryEmpty() {
+  if (historyItems.length) return;
+  els.history.innerHTML = `
+    <div class="empty-state">
+      <div class="empty-icon">💬</div>
+      <p class="empty-title">아직 질문이 없습니다</p>
+      <p class="empty-sub">위 입력창에 질문을 입력하거나, 예시 질문 버튼을 눌러 시작하세요.<br>
+      답변과 출처는 브라우저에 자동 저장되어 다음 방문 때도 유지됩니다.</p>
+    </div>`;
+}
+
+function renderHistoryAll() {
+  els.history.innerHTML = "";
+  if (!historyItems.length) {
+    renderHistoryEmpty();
+    return;
+  }
+  for (const item of historyItems) {
+    els.history.appendChild(buildQaCard(item));
+  }
+}
+
+function addHistoryItem(item) {
+  historyItems.unshift(item);
+  if (historyItems.length > HISTORY_LIMIT) historyItems.length = HISTORY_LIMIT;
+  saveHistoryItems(historyItems);
+  // 빈 상태 표시 제거 후 카드 prepend
+  if (els.history.querySelector(".empty-state")) els.history.innerHTML = "";
+  els.history.prepend(buildQaCard(item));
+}
+
+function deleteHistoryItem(id) {
+  historyItems = historyItems.filter((x) => x.id !== id);
+  saveHistoryItems(historyItems);
+  const card = els.history.querySelector(`[data-id="${CSS.escape(id)}"]`);
+  if (card) card.remove();
+  if (!historyItems.length) renderHistoryEmpty();
+}
+
+function clearAllHistory() {
+  historyItems = [];
+  saveHistoryItems(historyItems);
+  renderHistoryEmpty();
+}
+
+// 로딩 스켈레톤: askQuestion 동안 임시 카드 표시
+function makeSkeletonCard(q, scope) {
+  const wrap = document.createElement("article");
+  wrap.className = "qa qa-skeleton";
+  const scopeText = scope.length
+    ? scope.map((c) => COLLECTION_META[c]?.ko || c).join(", ")
+    : "전체 법령";
+  wrap.innerHTML = `
+    <h3 class="q">Q. ${escapeHtml(q)}</h3>
+    <div class="qa-meta">
+      <span class="qa-meta-item">📂 ${escapeHtml(scopeText)}</span>
+      <span class="qa-meta-item">⏳ Claude가 답변 생성 중…</span>
+    </div>
+    <div class="a">
+      <div class="skeleton-line" style="width: 96%"></div>
+      <div class="skeleton-line" style="width: 88%"></div>
+      <div class="skeleton-line" style="width: 70%"></div>
+      <div class="skeleton-line" style="width: 92%"></div>
+      <div class="skeleton-line" style="width: 60%"></div>
+    </div>`;
+  return wrap;
 }
 
 async function postQueryOnce(base, q, topK) {
@@ -431,6 +567,12 @@ async function askQuestion() {
 
   const t0 = performance.now();
   const scope = [...selectedCategories];
+
+  // 빈 상태 제거하고 스켈레톤 prepend
+  if (els.history.querySelector(".empty-state")) els.history.innerHTML = "";
+  const skeleton = makeSkeletonCard(q, scope);
+  els.history.prepend(skeleton);
+
   try {
     let data;
     try {
@@ -449,10 +591,21 @@ async function askQuestion() {
       }
     }
     const elapsedMs = performance.now() - t0;
-    renderItem(q, data.answer, data.sources || [], { scope, elapsedMs });
+    skeleton.remove();
+    addHistoryItem({
+      id: `qa_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      q,
+      a: data.answer,
+      sources: data.sources || [],
+      scope,
+      elapsedMs,
+      ts: Date.now(),
+    });
     els.question.value = "";
     setStatus("답변 생성 완료", "ok");
   } catch (e) {
+    skeleton.remove();
+    if (!historyItems.length) renderHistoryEmpty();
     setStatus(`요청 실패: ${e.message}`, "err");
   } finally {
     els.askBtn.disabled = false;
@@ -471,7 +624,10 @@ els.saveBtn.addEventListener("click", saveSettings);
 els.healthBtn.addEventListener("click", checkHealth);
 els.askBtn.addEventListener("click", askQuestion);
 els.clearBtn.addEventListener("click", () => {
-  els.history.innerHTML = "";
+  if (!historyItems.length) return;
+  if (confirm(`저장된 ${historyItems.length}개 질문을 모두 삭제하시겠습니까?`)) {
+    clearAllHistory();
+  }
 });
 els.question.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
@@ -479,4 +635,15 @@ els.question.addEventListener("keydown", (e) => {
   }
 });
 
+// 페이지 로드 시 저장된 히스토리 즉시 복원, 그 후 백엔드 헬스체크.
+historyItems = loadHistoryItems();
+renderHistoryAll();
 loadSettings().then(() => checkHealth());
+
+// 히스토리에 표시된 상대시간(NN분 전)을 1분마다 갱신.
+setInterval(() => {
+  els.history.querySelectorAll(".qa-meta-ts").forEach((el) => {
+    const ts = Number(el.dataset.ts);
+    if (ts) el.textContent = `🕘 ${formatRelativeTime(ts)}`;
+  });
+}, 60_000);

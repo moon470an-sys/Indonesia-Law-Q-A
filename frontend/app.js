@@ -31,6 +31,8 @@ const els = {
   historyCount: document.getElementById("historyCount"),
   exportBtn: document.getElementById("exportBtn"),
   themeToggle: document.getElementById("themeToggle"),
+  scrollTop: document.getElementById("scrollTop"),
+  citeTip: document.getElementById("citeTip"),
 };
 
 // indonesia_* 컬렉션명 → 한국어 표시명 + 약어 매핑.
@@ -487,32 +489,39 @@ function buildQaCard(item) {
     </details>
   `;
 
-  // 인용 칩 → 동일 카드 내 매칭되는 출처로 점프
+  // 인용 칩 인터랙션: 클릭 → 점프, 호버 → 미리보기 툴팁
+  const findSourceForCite = (cite) => {
+    const text = cite.textContent || "";
+    const filenameMatch = text.match(/출처:\s*([^,)]+)/);
+    const fname = filenameMatch ? filenameMatch[1].trim() : "";
+    if (!fname) return null;
+    const cards = wrap.querySelectorAll(".src-card");
+    for (const card of cards) {
+      const name = card.querySelector(".src-name")?.title || card.querySelector(".src-name")?.textContent || "";
+      if (name && (name.includes(fname) || fname.includes(name.replace(/…/, "")))) {
+        return card;
+      }
+    }
+    return null;
+  };
+
   wrap.querySelectorAll(".cite").forEach((cite) => {
     cite.style.cursor = "pointer";
-    cite.title = "클릭 → 매칭 출처로 이동";
+    cite.title = "클릭 → 매칭 출처로 이동, 호버 → 미리보기";
     cite.addEventListener("click", () => {
-      const text = cite.textContent || "";
-      const filenameMatch = text.match(/출처:\s*([^,)]+)/);
-      const fname = filenameMatch ? filenameMatch[1].trim() : "";
-      if (!fname) return;
-      const cards = wrap.querySelectorAll(".src-card");
-      let target = null;
-      for (const card of cards) {
-        const name = card.querySelector(".src-name")?.title || card.querySelector(".src-name")?.textContent || "";
-        if (name && (name.includes(fname) || fname.includes(name.replace(/…/, "")))) {
-          target = card;
-          break;
-        }
-      }
+      const target = findSourceForCite(cite);
       if (!target) return;
       const details = wrap.querySelector("details.sources");
       if (details && !details.open) details.open = true;
       target.scrollIntoView({ behavior: "smooth", block: "center" });
       target.classList.remove("pulse");
-      void target.offsetWidth; // reflow → 애니 재시작
+      void target.offsetWidth;
       target.classList.add("pulse");
     });
+    cite.addEventListener("mouseenter", () => showCiteTip(cite, findSourceForCite(cite)));
+    cite.addEventListener("mouseleave", hideCiteTip);
+    cite.addEventListener("focus", () => showCiteTip(cite, findSourceForCite(cite)));
+    cite.addEventListener("blur", hideCiteTip);
   });
 
   // 삭제 버튼
@@ -787,6 +796,61 @@ els.clearBtn.addEventListener("click", () => {
 els.question.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
     askQuestion();
+  }
+});
+
+// 인용 칩 호버 시 떠오르는 툴팁 (전역 단일 요소)
+function showCiteTip(cite, srcCard) {
+  if (!els.citeTip || !srcCard) return;
+  const meta = srcCard.querySelector(".src-name")?.title || srcCard.querySelector(".src-name")?.textContent || "";
+  const article = srcCard.querySelector(".src-article")?.textContent || "";
+  const page = srcCard.querySelector(".src-page")?.textContent || "";
+  const cat = srcCard.querySelector(".src-cat")?.textContent || "";
+  const snippet = srcCard.querySelector(".src-snippet")?.textContent || "";
+  const tipMeta = els.citeTip.querySelector(".cite-tip-meta");
+  const tipSnip = els.citeTip.querySelector(".cite-tip-snippet");
+  if (tipMeta) {
+    tipMeta.innerHTML = `${cat ? `<span class="cite-tip-cat">${escapeHtml(cat)}</span>` : ""}
+      <span class="cite-tip-name" title="${escapeHtml(meta)}">${escapeHtml(meta)}</span>
+      <span class="cite-tip-loc">${escapeHtml(page)} · ${escapeHtml(article)}</span>`;
+  }
+  if (tipSnip) tipSnip.textContent = snippet;
+
+  // 카드의 카테고리 컬러 변수도 복사 (카테고리별 보더 컬러)
+  const styles = getComputedStyle(srcCard);
+  els.citeTip.style.setProperty("--cat-color", styles.getPropertyValue("--cat-color"));
+
+  els.citeTip.hidden = false;
+  // 위치 계산: cite 아래 + 화면 안에 들어가도록 클램프
+  const rect = cite.getBoundingClientRect();
+  const tipRect = els.citeTip.getBoundingClientRect();
+  const margin = 8;
+  const vw = window.innerWidth;
+  let left = rect.left + window.scrollX;
+  let top = rect.bottom + window.scrollY + 6;
+  if (left + tipRect.width > vw - margin) left = vw - tipRect.width - margin;
+  if (left < margin) left = margin;
+  els.citeTip.style.left = `${Math.max(margin, left)}px`;
+  els.citeTip.style.top = `${top}px`;
+}
+function hideCiteTip() {
+  if (els.citeTip) els.citeTip.hidden = true;
+}
+
+// 위로 스크롤 부동 버튼
+function updateScrollTopVisibility() {
+  if (!els.scrollTop) return;
+  els.scrollTop.hidden = window.scrollY < 400;
+}
+window.addEventListener("scroll", updateScrollTopVisibility, { passive: true });
+els.scrollTop?.addEventListener("click", () => {
+  window.scrollTo({ top: 0, behavior: "smooth" });
+});
+// 't' 단축키: 위로 스크롤 (입력창 포커스 시는 제외)
+document.addEventListener("keydown", (e) => {
+  if (e.key.toLowerCase() === "t" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    if (["INPUT", "TEXTAREA"].includes(document.activeElement?.tagName)) return;
+    window.scrollTo({ top: 0, behavior: "smooth" });
   }
 });
 

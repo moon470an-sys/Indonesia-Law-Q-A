@@ -95,9 +95,15 @@
   <footer>
     <small>
       백엔드: 로컬 PC FastAPI · 벡터DB: ChromaDB · LLM: Anthropic Claude ·
-      답변은 제공된 헌법 원문을 근거로 생성됩니다.
+      답변은 제공된 법령 원문을 근거로 생성됩니다.
     </small>
   </footer>
+
+  <button id="scrollTop" class="scroll-top" type="button" aria-label="맨 위로" title="맨 위로 (T)" hidden>↑</button>
+  <div id="citeTip" class="cite-tip" role="tooltip" hidden>
+    <div class="cite-tip-meta"></div>
+    <div class="cite-tip-snippet"></div>
+  </div>
 
   <script src="config.js"></script>
   <script src="app.js"></script>

@@ -391,6 +391,7 @@ main {
 }
 .history-toolbar input[type="search"] {
   flex: 1;
+  min-width: 0;
   background: var(--panel-2);
   color: var(--text);
   border: 1px solid var(--border);
@@ -400,6 +401,20 @@ main {
   font-family: inherit;
 }
 .history-toolbar input[type="search"]:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.history-sort {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 12.5px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.history-sort:focus {
   outline: none;
   border-color: var(--accent);
 }
@@ -1069,6 +1084,58 @@ body.modal-open { overflow: hidden; }
 .help-tips strong { color: var(--accent); font-weight: 600; }
 .help-tips em { font-style: normal; color: var(--text); font-weight: 600; }
 
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+}
+.stat-cell {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.stat-label {
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+}
+.stat-val {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+  line-height: 1.15;
+}
+.stat-val-sm { font-size: 14px; color: var(--text); }
+.stat-suffix {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted);
+  margin-left: 4px;
+}
+.stat-sub {
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.stat-pill {
+  display: inline-block;
+  background: color-mix(in srgb, var(--cat-color, var(--accent)) 16%, transparent);
+  color: var(--cat-color, var(--accent));
+  border: 1px solid color-mix(in srgb, var(--cat-color, var(--accent)) 40%, transparent);
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .legend-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
@@ -1214,6 +1281,8 @@ body.modal-open { overflow: hidden; }
   .modal-card { max-height: 90vh; }
   .modal-body { padding: 14px 16px 18px; }
   .legend-grid { grid-template-columns: repeat(2, 1fr); }
+  .stats-grid { grid-template-columns: repeat(2, 1fr); }
+  .stat-val { font-size: 18px; }
 }
 @media (max-width: 380px) {
   .corpus-grid { grid-template-columns: repeat(2, 1fr); }

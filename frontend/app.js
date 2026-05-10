@@ -36,6 +36,9 @@ const els = {
   helpToggle: document.getElementById("helpToggle"),
   helpModal: document.getElementById("helpModal"),
   legendGrid: document.getElementById("legendGrid"),
+  statsSection: document.getElementById("statsSection"),
+  statsGrid: document.getElementById("statsGrid"),
+  historySort: document.getElementById("historySort"),
 };
 
 // indonesia_* 컬렉션명 → 한국어 표시명 + 약어 매핑.
@@ -781,6 +784,19 @@ function renderHistoryEmpty() {
     </div>`;
 }
 
+function sortedHistoryView() {
+  const mode = els.historySort?.value || "latest";
+  const arr = [...historyItems];
+  switch (mode) {
+    case "oldest":  arr.sort((a, b) => (a.ts || 0) - (b.ts || 0)); break;
+    case "fastest": arr.sort((a, b) => (a.elapsedMs || Infinity) - (b.elapsedMs || Infinity)); break;
+    case "slowest": arr.sort((a, b) => (b.elapsedMs || 0) - (a.elapsedMs || 0)); break;
+    case "latest":
+    default: arr.sort((a, b) => (b.ts || 0) - (a.ts || 0)); break;
+  }
+  return arr;
+}
+
 function renderHistoryAll() {
   els.history.innerHTML = "";
   if (!historyItems.length) {
@@ -788,7 +804,7 @@ function renderHistoryAll() {
     updateHistoryToolbar();
     return;
   }
-  for (const item of historyItems) {
+  for (const item of sortedHistoryView()) {
     els.history.appendChild(buildQaCard(item));
   }
   applyHistoryFilter();
@@ -799,9 +815,13 @@ function addHistoryItem(item) {
   historyItems.unshift(item);
   if (historyItems.length > HISTORY_LIMIT) historyItems.length = HISTORY_LIMIT;
   saveHistoryItems(historyItems);
-  // 빈 상태 표시 제거 후 카드 prepend
-  if (els.history.querySelector(".empty-state")) els.history.innerHTML = "";
-  els.history.prepend(buildQaCard(item));
+  const sortMode = els.historySort?.value || "latest";
+  if (sortMode === "latest") {
+    if (els.history.querySelector(".empty-state")) els.history.innerHTML = "";
+    els.history.prepend(buildQaCard(item));
+  } else {
+    renderHistoryAll();
+  }
   applyHistoryFilter();
   updateHistoryToolbar();
 }
@@ -1074,6 +1094,72 @@ function autosizeQuestion() {
 }
 els.question.addEventListener("input", autosizeQuestion);
 
+function computeUsageStats() {
+  if (!historyItems.length) return null;
+  const n = historyItems.length;
+  const catCounts = new Map();      // 인용된 출처 카테고리 카운트
+  const askedCats = new Map();      // 사용자가 범위로 지정한 카테고리 카운트
+  let totalMs = 0, validMs = 0, minMs = Infinity, maxMs = 0;
+  let firstTs = Infinity, lastTs = 0;
+  let totalChars = 0;
+  for (const item of historyItems) {
+    if (item.ts) { firstTs = Math.min(firstTs, item.ts); lastTs = Math.max(lastTs, item.ts); }
+    if (item.elapsedMs > 0) {
+      totalMs += item.elapsedMs;
+      validMs++;
+      minMs = Math.min(minMs, item.elapsedMs);
+      maxMs = Math.max(maxMs, item.elapsedMs);
+    }
+    totalChars += String(item.a || "").length;
+    for (const s of (item.sources || [])) {
+      const k = categoryKo(s.category) || "기타";
+      catCounts.set(k, (catCounts.get(k) || 0) + 1);
+    }
+    for (const c of (item.scope || [])) {
+      const k = COLLECTION_META[c]?.ko || c;
+      askedCats.set(k, (askedCats.get(k) || 0) + 1);
+    }
+  }
+  const avgMs = validMs ? totalMs / validMs : 0;
+  const topCited = [...catCounts.entries()].sort(([, a], [, b]) => b - a)[0];
+  const topAsked = [...askedCats.entries()].sort(([, a], [, b]) => b - a)[0];
+  return { n, avgMs, minMs: minMs === Infinity ? 0 : minMs, maxMs, firstTs, lastTs, totalChars, topCited, topAsked, catCounts };
+}
+
+function fmtMs(ms) { return `${(ms / 1000).toFixed(1)}s`; }
+function fmtDate(ts) {
+  if (!ts) return "—";
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function renderUsageStats() {
+  if (!els.statsSection || !els.statsGrid) return;
+  const st = computeUsageStats();
+  if (!st) { els.statsSection.hidden = true; return; }
+  els.statsSection.hidden = false;
+  const topCitedHtml = st.topCited
+    ? `<span class="${categoryHueClass(st.topCited[0])} stat-pill">${escapeHtml(st.topCited[0])} ${st.topCited[1]}건</span>`
+    : "—";
+  const topAskedHtml = st.topAsked
+    ? `<span class="stat-pill">${escapeHtml(st.topAsked[0])}</span>`
+    : `<span class="stat-pill">전체 검색</span>`;
+  const periodHtml = (st.firstTs !== Infinity)
+    ? (fmtDate(st.firstTs) === fmtDate(st.lastTs)
+        ? `${fmtDate(st.firstTs)}`
+        : `${fmtDate(st.firstTs)} ~ ${fmtDate(st.lastTs)}`)
+    : "—";
+
+  els.statsGrid.innerHTML = `
+    <div class="stat-cell"><div class="stat-label">저장된 Q&A</div><div class="stat-val">${st.n}<span class="stat-suffix">건</span></div></div>
+    <div class="stat-cell"><div class="stat-label">평균 응답</div><div class="stat-val">${fmtMs(st.avgMs)}</div><div class="stat-sub">최단 ${fmtMs(st.minMs)} · 최장 ${fmtMs(st.maxMs)}</div></div>
+    <div class="stat-cell"><div class="stat-label">답변 총 분량</div><div class="stat-val">${formatCount(st.totalChars)}<span class="stat-suffix">자</span></div></div>
+    <div class="stat-cell"><div class="stat-label">사용 기간</div><div class="stat-val stat-val-sm">${escapeHtml(periodHtml)}</div></div>
+    <div class="stat-cell"><div class="stat-label">가장 자주 인용된 분류</div><div class="stat-val stat-val-sm">${topCitedHtml}</div></div>
+    <div class="stat-cell"><div class="stat-label">가장 많이 범위 지정한 분류</div><div class="stat-val stat-val-sm">${topAskedHtml}</div></div>
+  `;
+}
+
 // 도움말 모달
 function openHelp() {
   if (!els.helpModal) return;
@@ -1089,6 +1175,7 @@ function openHelp() {
     }).join("");
     els.legendGrid.dataset.filled = "1";
   }
+  renderUsageStats();
   els.helpModal.hidden = false;
   document.body.classList.add("modal-open");
 }
@@ -1284,6 +1371,12 @@ els.corpusSelectNone?.addEventListener("click", () => {
 // 히스토리 검색 (디바운싱 없이 단순 즉시 필터)
 els.historySearch?.addEventListener("input", () => {
   applyHistoryFilter();
+});
+
+// 정렬 변경 → 전체 재렌더 (sort는 latest/oldest/elapsed 기반, 데이터 변경 없음)
+els.historySort?.addEventListener("change", () => {
+  if (!historyItems.length) return;
+  renderHistoryAll();
 });
 
 // 페이지 로드 시 테마 → 히스토리 → 예시 → 헬스체크.

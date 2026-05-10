@@ -534,7 +534,7 @@ button.secondary:hover { border-color: var(--accent); }
   gap: 6px;
   flex-shrink: 0;
 }
-.qa-copy, .qa-del {
+.qa-copy, .qa-del, .qa-collapse {
   background: transparent;
   border: 1px solid var(--border);
   color: var(--muted);
@@ -544,7 +544,23 @@ button.secondary:hover { border-color: var(--accent); }
   cursor: pointer;
   transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
   font-weight: 500;
+  font-family: inherit;
 }
+.qa-collapse:hover {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* 접힌 상태: 답변/출처 영역을 ~14em 높이로 페이드아웃 처리 */
+.qa-collapsed .a {
+  max-height: 14em;
+  overflow: hidden;
+  position: relative;
+  mask-image: linear-gradient(180deg, #000 70%, transparent);
+  -webkit-mask-image: linear-gradient(180deg, #000 70%, transparent);
+}
+.qa-collapsed details.sources { display: none; }
 .qa-copy:hover {
   background: color-mix(in srgb, var(--accent) 12%, transparent);
   border-color: var(--accent);

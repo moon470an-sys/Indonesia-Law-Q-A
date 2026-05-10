@@ -8,7 +8,10 @@ const LS_KEYS = {
   theme: "rag.theme",
   fontSize: "rag.fontSize",
   corpusSort: "rag.corpusSort",
+  draft: "rag.draft",
 };
+
+const LONG_ANSWER_CHARS = 800; // 이 이상이면 접기 버튼 노출
 const HISTORY_LIMIT = 30;
 
 const els = {
@@ -628,10 +631,15 @@ function buildQaCard(item) {
     ts ? `<span class="qa-meta-item qa-meta-ts" data-ts="${ts}">🕘 ${escapeHtml(formatRelativeTime(ts))}</span>` : "",
   ].filter(Boolean).join("");
 
+  const isLong = String(a || "").length >= LONG_ANSWER_CHARS;
+  const collapseBtn = isLong
+    ? `<button class="qa-collapse" type="button" aria-pressed="false" aria-label="답변 접기/펼치기" title="긴 답변 접기/펼치기">▴ 접기</button>`
+    : "";
   wrap.innerHTML = `
     <header class="qa-head">
       <h3 class="q" title="클릭 → 입력창에 다시 채우기">Q. ${escapeHtml(q)}</h3>
       <div class="qa-actions">
+        ${collapseBtn}
         <button class="qa-copy" type="button" aria-label="답변 복사" title="답변을 클립보드에 복사">📋 복사</button>
         <button class="qa-del" type="button" aria-label="이 질문 삭제" title="삭제">✕</button>
       </div>
@@ -731,6 +739,16 @@ function buildQaCard(item) {
       }
     });
   });
+
+  // 접기/펼치기 버튼
+  const collapseBtnEl = wrap.querySelector(".qa-collapse");
+  if (collapseBtnEl) {
+    collapseBtnEl.addEventListener("click", () => {
+      const collapsed = wrap.classList.toggle("qa-collapsed");
+      collapseBtnEl.setAttribute("aria-pressed", collapsed ? "true" : "false");
+      collapseBtnEl.textContent = collapsed ? "▾ 펼치기" : "▴ 접기";
+    });
+  }
 
   // 출처 카테고리 필터 칩 (Q&A별)
   const filterBtns = wrap.querySelectorAll(".src-filter");
@@ -1087,6 +1105,7 @@ async function askQuestion() {
     });
     els.question.value = "";
     autosizeQuestion();
+    clearDraft();
     setStatus("답변 생성 완료", "ok");
   } catch (e) {
     stopStages();
@@ -1134,11 +1153,38 @@ els.question.addEventListener("keydown", (e) => {
 // 질문창 자동 높이 조절 (입력 길이에 따라 늘어나도록, 최대 12줄)
 function autosizeQuestion() {
   els.question.style.height = "auto";
-  const max = 12 * 22; // 약 12줄 분량 (line-height 보수적 추정)
+  const max = 12 * 22;
   const next = Math.min(els.question.scrollHeight, max);
   els.question.style.height = `${next}px`;
 }
-els.question.addEventListener("input", autosizeQuestion);
+
+// 입력 텍스트 임시 저장 (장문 작성 중 새로고침해도 보존)
+let draftDebounce = 0;
+function saveDraft() {
+  try {
+    const v = els.question.value;
+    if (v) localStorage.setItem(LS_KEYS.draft, v);
+    else localStorage.removeItem(LS_KEYS.draft);
+  } catch {}
+}
+function clearDraft() {
+  try { localStorage.removeItem(LS_KEYS.draft); } catch {}
+}
+function restoreDraft() {
+  try {
+    const v = localStorage.getItem(LS_KEYS.draft) || "";
+    if (v && !els.question.value) {
+      els.question.value = v;
+      autosizeQuestion();
+    }
+  } catch {}
+}
+
+els.question.addEventListener("input", () => {
+  autosizeQuestion();
+  clearTimeout(draftDebounce);
+  draftDebounce = setTimeout(saveDraft, 400);
+});
 
 function computeUsageStats() {
   if (!historyItems.length) return null;
@@ -1512,6 +1558,7 @@ els.historySort?.addEventListener("change", () => {
 historyItems = loadHistoryItems();
 renderHistoryAll();
 renderExamples(); // 초기 chip 렌더 (헬스체크 응답 전에도 보이도록)
+restoreDraft();
 loadSettings().then(() => checkHealth());
 
 // 히스토리에 표시된 상대시간(NN분 전)을 1분마다 갱신.

@@ -4,12 +4,25 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>인도네시아 법령 Q&amp;A</title>
+  <script>
+    // FOUC 방지: 저장된 테마를 CSS 로드 전 즉시 적용
+    (function() {
+      try {
+        var t = localStorage.getItem("rag.theme");
+        if (!t && window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches) t = "light";
+        if (t === "light") document.documentElement.setAttribute("data-theme", "light");
+      } catch (e) {}
+    })();
+  </script>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <header class="topbar">
     <h1>📜 인도네시아 법령 Q&amp;A</h1>
-    <div class="status" id="status">백엔드 상태 확인 중…</div>
+    <div class="topbar-right">
+      <div class="status" id="status">백엔드 상태 확인 중…</div>
+      <button id="themeToggle" class="icon-btn" type="button" aria-label="테마 전환" title="라이트/다크 모드 전환">🌙</button>
+    </div>
   </header>
 
   <main>
@@ -73,6 +86,7 @@
     <section class="history-toolbar" id="historyToolbar" hidden>
       <input type="search" id="historySearch" placeholder="저장된 질문/답변에서 검색…" aria-label="히스토리 검색" />
       <span class="history-count" id="historyCount"></span>
+      <button id="exportBtn" class="link-btn" type="button" title="현재 표시된 항목을 Markdown 파일로 다운로드">📥 내보내기</button>
     </section>
 
     <section id="history" class="history"></section>

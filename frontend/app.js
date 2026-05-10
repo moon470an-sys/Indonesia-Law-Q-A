@@ -5,6 +5,7 @@ const LS_KEYS = {
   token: "rag.apiToken",
   topK: "rag.topK",
   history: "rag.history",
+  theme: "rag.theme",
 };
 const HISTORY_LIMIT = 30;
 
@@ -28,6 +29,8 @@ const els = {
   historyToolbar: document.getElementById("historyToolbar"),
   historySearch: document.getElementById("historySearch"),
   historyCount: document.getElementById("historyCount"),
+  exportBtn: document.getElementById("exportBtn"),
+  themeToggle: document.getElementById("themeToggle"),
 };
 
 // indonesia_* 컬렉션명 → 한국어 표시명 + 약어 매핑.
@@ -787,6 +790,98 @@ els.question.addEventListener("keydown", (e) => {
   }
 });
 
+// 테마 토글: 다크(기본) ↔ 라이트, localStorage에 저장
+function applyTheme(theme) {
+  const root = document.documentElement;
+  if (theme === "light") {
+    root.setAttribute("data-theme", "light");
+    if (els.themeToggle) {
+      els.themeToggle.textContent = "☀️";
+      els.themeToggle.title = "다크 모드로 전환";
+    }
+  } else {
+    root.removeAttribute("data-theme");
+    if (els.themeToggle) {
+      els.themeToggle.textContent = "🌙";
+      els.themeToggle.title = "라이트 모드로 전환";
+    }
+  }
+}
+function toggleTheme() {
+  const current = document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark";
+  const next = current === "light" ? "dark" : "light";
+  applyTheme(next);
+  try { localStorage.setItem(LS_KEYS.theme, next); } catch {}
+}
+els.themeToggle?.addEventListener("click", toggleTheme);
+
+// Markdown 내보내기: 현재 (검색 필터로) 표시되는 항목들만 .md 파일로 다운로드.
+function exportHistoryAsMarkdown() {
+  const q = (els.historySearch?.value || "").trim().toLowerCase();
+  const matchesQuery = (item) => {
+    if (!q) return true;
+    const blob = `${item.q}\n${item.a}\n${(item.sources || []).map((s) => `${s.source} ${s.article}`).join(" ")}`;
+    return blob.toLowerCase().includes(q);
+  };
+  const items = historyItems.filter(matchesQuery);
+  if (!items.length) {
+    setStatus("내보낼 항목이 없습니다", "warn");
+    return;
+  }
+  const lines = [];
+  lines.push(`# 인도네시아 법령 Q&A — ${items.length}개 질의응답`);
+  lines.push("");
+  lines.push(`*생성일: ${new Date().toLocaleString("ko-KR")}*`);
+  if (q) lines.push(`*검색 필터: "${q}"*`);
+  lines.push("");
+  lines.push("---");
+  lines.push("");
+
+  items.forEach((item, idx) => {
+    const ts = item.ts ? new Date(item.ts).toLocaleString("ko-KR") : "";
+    const scope = (item.scope && item.scope.length)
+      ? item.scope.map((c) => COLLECTION_META[c]?.ko || c).join(", ")
+      : "전체 법령";
+    lines.push(`## ${idx + 1}. ${item.q}`);
+    lines.push("");
+    lines.push(`> 📂 ${scope}  ·  🔎 출처 ${(item.sources || []).length}건${ts ? `  ·  🕘 ${ts}` : ""}${item.elapsedMs ? `  ·  ⏱ ${(item.elapsedMs / 1000).toFixed(1)}s` : ""}`);
+    lines.push("");
+    lines.push(item.a || "");
+    lines.push("");
+    if (item.sources && item.sources.length) {
+      lines.push("### 출처");
+      lines.push("");
+      item.sources.forEach((s, i) => {
+        const cat = categoryKo(s.category) || "";
+        const article = s.article || "조항 미확인";
+        const score = (s.score || 0).toFixed(2);
+        lines.push(`${i + 1}. **${cat}** · \`${s.source}\` · p.${s.page} · ${article} (유사도 ${score})`);
+        if (s.snippet) {
+          lines.push("");
+          lines.push("   > " + s.snippet.replace(/\n/g, "\n   > "));
+        }
+        lines.push("");
+      });
+    }
+    lines.push("---");
+    lines.push("");
+  });
+
+  const md = lines.join("\n");
+  const blob = new Blob([md], { type: "text/markdown;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  const stamp = new Date().toISOString().slice(0, 16).replace(/[T:]/g, "-");
+  a.href = url;
+  a.download = `indonesia-law-qa_${stamp}.md`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  setStatus(`${items.length}개 항목을 Markdown으로 내보냈습니다`, "ok");
+}
+els.exportBtn?.addEventListener("click", exportHistoryAsMarkdown);
+
 // 코퍼스 전체 / 해제 버튼
 els.corpusSelectAll?.addEventListener("click", () => {
   const cards = els.corpusGrid.querySelectorAll(".corpus-card");
@@ -812,7 +907,16 @@ els.historySearch?.addEventListener("input", () => {
   applyHistoryFilter();
 });
 
-// 페이지 로드 시 저장된 히스토리 즉시 복원, 그 후 백엔드 헬스체크.
+// 페이지 로드 시 테마 → 히스토리 → 예시 → 헬스체크.
+(function initTheme() {
+  let saved = "";
+  try { saved = localStorage.getItem(LS_KEYS.theme) || ""; } catch {}
+  if (!saved && window.matchMedia) {
+    saved = window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+  }
+  applyTheme(saved || "dark");
+})();
+
 historyItems = loadHistoryItems();
 renderHistoryAll();
 renderExamples(); // 초기 chip 렌더 (헬스체크 응답 전에도 보이도록)

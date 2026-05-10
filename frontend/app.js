@@ -329,6 +329,8 @@ function renderInline(line) {
   // 외부 URL 자동 링크화 (인용 칩 변환 전에 해야 () 안 URL도 처리)
   out = out.replace(/(?<![">])(https?:\/\/[^\s<)]+[^\s<.,;:!?)])/g,
     '<a href="$1" target="_blank" rel="noopener noreferrer" class="a-link">$1</a>');
+  // [1], [2] 형태의 출처 인덱스 → 클릭 가능한 ref 칩 (출처 카드로 점프)
+  out = out.replace(/\[(\d{1,2})\]/g, '<a href="#" class="src-ref" data-idx="$1">[$1]</a>');
   // (Pasal X, 출처: ...) → 인용 칩
   out = out.replace(CITE_RE, '<span class="cite">$1</span>');
   return out;
@@ -511,7 +513,7 @@ function renderSource(s, i) {
   const catKo = categoryKo(cat);
   const hueCls = categoryHueClass(cat);
   return `
-    <li class="src-card ${hueCls}" data-cat="${escapeHtml(catKo)}">
+    <li class="src-card ${hueCls}" data-cat="${escapeHtml(catKo)}" data-idx="${i + 1}">
       <header class="src-top">
         <span class="src-idx">#${i + 1}</span>
         ${catKo ? `<span class="src-cat">${escapeHtml(catKo)}</span>` : ""}
@@ -519,6 +521,7 @@ function renderSource(s, i) {
           <span class="src-score-bar"><span style="width:${scorePct}%"></span></span>
           <span class="src-score-num">${score.toFixed(2)}</span>
         </span>
+        <button type="button" class="src-copy" title="이 출처 정보 복사" aria-label="이 출처 정보 복사">📋</button>
       </header>
       <div class="src-name" title="${escapeHtml(s.source || "")}">${escapeHtml(shortenFileName(s.source))}</div>
       <div class="src-meta">
@@ -661,6 +664,45 @@ function buildQaCard(item) {
     els.question.focus();
     autosizeQuestion();
     els.question.scrollIntoView({ behavior: "smooth", block: "center" });
+  });
+
+  // 답변 안의 출처 인덱스 [N] → 같은 카드의 출처 #N으로 점프 + 펄스
+  wrap.querySelectorAll("a.src-ref").forEach((ref) => {
+    ref.addEventListener("click", (e) => {
+      e.preventDefault();
+      const idx = ref.dataset.idx;
+      const target = wrap.querySelector(`.src-card[data-idx="${CSS.escape(idx)}"]`);
+      if (!target) return;
+      const details = wrap.querySelector("details.sources");
+      if (details && !details.open) details.open = true;
+      target.scrollIntoView({ behavior: "smooth", block: "center" });
+      target.classList.remove("pulse");
+      void target.offsetWidth;
+      target.classList.add("pulse");
+    });
+  });
+
+  // 개별 출처 복사 버튼
+  wrap.querySelectorAll(".src-copy").forEach((btn) => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const card = btn.closest(".src-card");
+      if (!card) return;
+      const idx = card.dataset.idx;
+      const i = Number(idx) - 1;
+      const src = sources[i];
+      if (!src) return;
+      const cat = categoryKo(src.category) || "";
+      const text = `[${cat}] ${src.source} · p.${src.page} · ${src.article || "조항 미확인"} (유사도 ${(src.score || 0).toFixed(2)})`;
+      try {
+        await navigator.clipboard.writeText(text);
+        btn.textContent = "✅";
+        setTimeout(() => { btn.textContent = "📋"; }, 1200);
+      } catch {
+        btn.textContent = "❌";
+        setTimeout(() => { btn.textContent = "📋"; }, 1200);
+      }
+    });
   });
 
   // 출처 카테고리 필터 칩 (Q&A별)

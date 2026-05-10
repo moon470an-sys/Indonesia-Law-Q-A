@@ -25,6 +25,10 @@
     <h1>📜 인도네시아 법령 Q&amp;A</h1>
     <div class="topbar-right">
       <div class="status" id="status">백엔드 상태 확인 중…</div>
+      <div class="font-toggle" role="group" aria-label="본문 글자 크기">
+        <button id="fontMinus" class="icon-btn icon-btn-sm" type="button" aria-label="글자 작게" title="글자 작게 (−)">A−</button>
+        <button id="fontPlus" class="icon-btn icon-btn-sm" type="button" aria-label="글자 크게" title="글자 크게 (+)">A+</button>
+      </div>
       <button id="helpToggle" class="icon-btn" type="button" aria-label="도움말 (단축키 ?)" title="도움말 (?)"><span aria-hidden="true">?</span></button>
       <button id="themeToggle" class="icon-btn" type="button" aria-label="테마 전환" title="라이트/다크 모드 전환">🌙</button>
     </div>
@@ -36,6 +40,12 @@
         <h2>📚 인덱싱된 법령 코퍼스</h2>
         <div class="corpus-head-right">
           <span class="corpus-total" id="corpusTotal">—</span>
+          <select id="corpusSort" class="history-sort" aria-label="코퍼스 정렬" title="정렬">
+            <option value="default">법령 위계순</option>
+            <option value="most">청크 많은순</option>
+            <option value="least">청크 적은순</option>
+            <option value="alpha">가나다순</option>
+          </select>
           <div class="corpus-quick">
             <button id="corpusSelectAll" class="link-btn" type="button" title="모든 카테고리 선택">전체</button>
             <span class="sep">·</span>

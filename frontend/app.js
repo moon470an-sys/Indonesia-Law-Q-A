@@ -6,6 +6,8 @@ const LS_KEYS = {
   topK: "rag.topK",
   history: "rag.history",
   theme: "rag.theme",
+  fontSize: "rag.fontSize",
+  corpusSort: "rag.corpusSort",
 };
 const HISTORY_LIMIT = 30;
 
@@ -39,6 +41,9 @@ const els = {
   statsSection: document.getElementById("statsSection"),
   statsGrid: document.getElementById("statsGrid"),
   historySort: document.getElementById("historySort"),
+  fontMinus: document.getElementById("fontMinus"),
+  fontPlus: document.getElementById("fontPlus"),
+  corpusSort: document.getElementById("corpusSort"),
 };
 
 // indonesia_* 컬렉션명 → 한국어 표시명 + 약어 매핑.
@@ -184,21 +189,40 @@ function applyHealth(data) {
   }
 }
 
+let lastCorpusData = null; // 마지막 health 응답 캐시 (정렬 변경 시 재렌더용)
+
 function renderCorpus(perCollection, total) {
+  lastCorpusData = { perCollection, total };
   const entries = Object.entries(perCollection || {}).filter(([, n]) => n > 0);
   if (!entries.length) {
     els.corpus.hidden = true;
     return;
   }
-  // 미리 정의된 순서에 따라 정렬, 그 외는 뒤에 추가.
-  entries.sort(([a], [b]) => {
-    const ia = COLLECTION_ORDER.indexOf(a);
-    const ib = COLLECTION_ORDER.indexOf(b);
-    if (ia === -1 && ib === -1) return a.localeCompare(b);
-    if (ia === -1) return 1;
-    if (ib === -1) return -1;
-    return ia - ib;
-  });
+  const mode = els.corpusSort?.value || "default";
+  const koOf = (name) => COLLECTION_META[name]?.ko || name;
+  switch (mode) {
+    case "most":
+      entries.sort(([, a], [, b]) => b - a);
+      break;
+    case "least":
+      entries.sort(([, a], [, b]) => a - b);
+      break;
+    case "alpha":
+      entries.sort(([a], [b]) => koOf(a).localeCompare(koOf(b), "ko"));
+      break;
+    case "default":
+    default:
+      // 법령 위계순 (미리 정의된 순서)
+      entries.sort(([a], [b]) => {
+        const ia = COLLECTION_ORDER.indexOf(a);
+        const ib = COLLECTION_ORDER.indexOf(b);
+        if (ia === -1 && ib === -1) return a.localeCompare(b);
+        if (ia === -1) return 1;
+        if (ib === -1) return -1;
+        return ia - ib;
+      });
+      break;
+  }
   const max = entries.reduce((m, [, n]) => Math.max(m, n), 1);
 
   els.corpusTotal.textContent = `총 ${formatCount(total)}개 청크 · ${entries.length}개 카테고리`;
@@ -1160,6 +1184,34 @@ function renderUsageStats() {
   `;
 }
 
+// 본문 폰트 사이즈 (0=작게, 1=기본, 2=크게)
+const FONT_SCALES = ["sm", "md", "lg"];
+function applyFontSize(idx) {
+  const i = Math.max(0, Math.min(FONT_SCALES.length - 1, idx));
+  document.documentElement.setAttribute("data-font", FONT_SCALES[i]);
+  try { localStorage.setItem(LS_KEYS.fontSize, String(i)); } catch {}
+  if (els.fontMinus) els.fontMinus.disabled = i === 0;
+  if (els.fontPlus) els.fontPlus.disabled = i === FONT_SCALES.length - 1;
+}
+function currentFontIdx() {
+  const cur = document.documentElement.getAttribute("data-font");
+  const i = FONT_SCALES.indexOf(cur);
+  return i === -1 ? 1 : i;
+}
+els.fontMinus?.addEventListener("click", () => applyFontSize(currentFontIdx() - 1));
+els.fontPlus?.addEventListener("click", () => applyFontSize(currentFontIdx() + 1));
+
+// 키보드 단축키: Ctrl/Cmd 와 함께 + / - 로도 조절 (브라우저 zoom 충돌 피해 단독 키도 옵션으로 제공)
+document.addEventListener("keydown", (e) => {
+  const isInput = ["INPUT", "TEXTAREA"].includes(document.activeElement?.tagName);
+  if (isInput || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.key === "+" || e.key === "=") {
+    applyFontSize(currentFontIdx() + 1);
+  } else if (e.key === "-" || e.key === "_") {
+    applyFontSize(currentFontIdx() - 1);
+  }
+});
+
 // 도움말 모달
 function openHelp() {
   if (!els.helpModal) return;
@@ -1360,6 +1412,10 @@ els.corpusSelectAll?.addEventListener("click", () => {
   });
   updateScopeIndicator();
 });
+els.corpusSort?.addEventListener("change", () => {
+  try { localStorage.setItem(LS_KEYS.corpusSort, els.corpusSort.value); } catch {}
+  if (lastCorpusData) renderCorpus(lastCorpusData.perCollection, lastCorpusData.total);
+});
 els.corpusSelectNone?.addEventListener("click", () => {
   selectedCategories.clear();
   els.corpusGrid.querySelectorAll(".corpus-card").forEach((card) => {
@@ -1379,7 +1435,7 @@ els.historySort?.addEventListener("change", () => {
   renderHistoryAll();
 });
 
-// 페이지 로드 시 테마 → 히스토리 → 예시 → 헬스체크.
+// 페이지 로드 시 테마 → 폰트 사이즈 → 코퍼스 정렬 → 히스토리 → 예시 → 헬스체크.
 (function initTheme() {
   let saved = "";
   try { saved = localStorage.getItem(LS_KEYS.theme) || ""; } catch {}
@@ -1387,6 +1443,19 @@ els.historySort?.addEventListener("change", () => {
     saved = window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
   }
   applyTheme(saved || "dark");
+})();
+(function initFontSize() {
+  let saved = 1;
+  try {
+    const v = parseInt(localStorage.getItem(LS_KEYS.fontSize) || "", 10);
+    if (!isNaN(v)) saved = v;
+  } catch {}
+  applyFontSize(saved);
+})();
+(function initCorpusSort() {
+  let saved = "default";
+  try { saved = localStorage.getItem(LS_KEYS.corpusSort) || "default"; } catch {}
+  if (els.corpusSort) els.corpusSort.value = saved;
 })();
 
 historyItems = loadHistoryItems();

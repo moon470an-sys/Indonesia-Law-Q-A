@@ -33,6 +33,9 @@ const els = {
   themeToggle: document.getElementById("themeToggle"),
   scrollTop: document.getElementById("scrollTop"),
   citeTip: document.getElementById("citeTip"),
+  helpToggle: document.getElementById("helpToggle"),
+  helpModal: document.getElementById("helpModal"),
+  legendGrid: document.getElementById("legendGrid"),
 };
 
 // indonesia_* 컬렉션명 → 한국어 표시명 + 약어 매핑.
@@ -328,12 +331,24 @@ function renderInline(line) {
   return out;
 }
 
+function isTableSeparator(line) {
+  // 마크다운 테이블 구분선: |---|---| 또는 | :--- | :---: | ---: |
+  if (!/^\s*\|/.test(line)) return false;
+  const inner = line.replace(/^\s*\||\|\s*$/g, "");
+  const cells = inner.split("|").map((s) => s.trim());
+  return cells.length > 0 && cells.every((c) => /^:?-+:?$/.test(c));
+}
+function parseTableRow(line) {
+  return line.replace(/^\s*\||\|\s*$/g, "").split("|").map((s) => s.trim());
+}
+
 function renderAnswer(answer) {
-  // Claude 출력 마크다운 일부 렌더링: 볼드/이탤릭/인라인코드/리스트/헤딩/blockquote/단락.
+  // Claude 출력 마크다운 일부 렌더링: 볼드/이탤릭/인라인코드/리스트/헤딩/blockquote/테이블/단락.
   const lines = String(answer || "").replace(/\r\n/g, "\n").split("\n");
   const blocks = [];
   let buf = [];
   let mode = null; // "ul" | "ol" | "bq" | null
+  let tableRows = []; // 테이블 누적 (헤더 + 데이터 행)
 
   const flushPara = () => {
     if (buf.length) {
@@ -355,14 +370,31 @@ function renderAnswer(answer) {
     }
     buf = [];
   };
+  const flushTable = () => {
+    if (tableRows.length >= 2) {
+      const [header, ...dataRows] = tableRows;
+      const thead = `<thead><tr>${header.map((c) => `<th>${renderInline(c)}</th>`).join("")}</tr></thead>`;
+      const tbody = dataRows.length
+        ? `<tbody>${dataRows.map((r) => `<tr>${r.map((c) => `<td>${renderInline(c)}</td>`).join("")}</tr>`).join("")}</tbody>`
+        : "";
+      blocks.push(`<div class="a-table-wrap"><table class="a-table">${thead}${tbody}</table></div>`);
+    } else if (tableRows.length === 1) {
+      // separator 없으면 그냥 단락으로 떨어뜨림
+      buf.push(tableRows[0].join(" | "));
+      flushPara();
+    }
+    tableRows = [];
+  };
   const flush = () => {
     if (mode === "ul" || mode === "ol") flushList();
     else if (mode === "bq") flushBq();
+    else if (mode === "table") flushTable();
     else flushPara();
     mode = null;
   };
 
-  for (const raw of lines) {
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
     const line = raw.trimEnd();
     if (!line.trim()) {
       flush();
@@ -372,12 +404,33 @@ function renderAnswer(answer) {
     const olM = line.match(/^\s*\d+\.\s+(.+)$/);
     const hM = line.match(/^\s*(#{1,3})\s+(.+)$/);
     const bqM = line.match(/^\s*>\s?(.*)$/);
+    const isPipeRow = /^\s*\|.*\|\s*$/.test(line);
 
     if (hM) {
       flush();
       const level = Math.min(hM[1].length + 2, 4);
       blocks.push(`<h${level} class="a-h">${renderInline(hM[2])}</h${level}>`);
       continue;
+    }
+    // 테이블: 헤더 행 + 다음 줄이 separator일 때만 테이블 진입
+    if (isPipeRow && mode !== "table") {
+      const next = (lines[i + 1] || "").trimEnd();
+      if (isTableSeparator(next)) {
+        flush();
+        mode = "table";
+        tableRows.push(parseTableRow(line));
+        i++; // separator 건너뜀
+        continue;
+      }
+    }
+    if (mode === "table") {
+      if (isPipeRow) {
+        tableRows.push(parseTableRow(line));
+        continue;
+      } else {
+        flush();
+        // fall through to 일반 처리
+      }
     }
     if (bqM) {
       if (mode !== "bq") flush();
@@ -398,7 +451,7 @@ function renderAnswer(answer) {
       continue;
     }
     // 일반 단락 라인
-    if (mode === "ul" || mode === "ol" || mode === "bq") flush();
+    if (mode === "ul" || mode === "ol" || mode === "bq" || mode === "table") flush();
     buf.push(line);
   }
   flush();
@@ -785,6 +838,9 @@ function applyHistoryFilter() {
   const qLower = q.toLowerCase();
   const cards = els.history.querySelectorAll(".qa");
 
+  // 빈 검색결과 placeholder 제거 (뒤에서 필요시 다시 삽입)
+  els.history.querySelectorAll(".no-match").forEach((n) => n.remove());
+
   // 모든 카드의 기존 하이라이트 먼저 제거
   cards.forEach((c) => clearSearchHighlights(c));
 
@@ -793,12 +849,25 @@ function applyHistoryFilter() {
     updateHistoryToolbar();
     return;
   }
+  let visibleCount = 0;
   cards.forEach((card) => {
     const text = card.textContent.toLowerCase();
     const match = text.includes(qLower);
     card.hidden = !match;
-    if (match) highlightTextIn(card, q);
+    if (match) {
+      highlightTextIn(card, q);
+      visibleCount++;
+    }
   });
+  if (visibleCount === 0 && cards.length > 0) {
+    const note = document.createElement("div");
+    note.className = "no-match";
+    note.innerHTML = `
+      <div class="empty-icon">🔍</div>
+      <p class="empty-title">"${escapeHtml(q)}" 와 일치하는 항목이 없습니다</p>
+      <p class="empty-sub">검색어를 줄이거나 다른 키워드를 시도해보세요.</p>`;
+    els.history.appendChild(note);
+  }
   updateHistoryToolbar();
 }
 
@@ -946,6 +1015,46 @@ function autosizeQuestion() {
   els.question.style.height = `${next}px`;
 }
 els.question.addEventListener("input", autosizeQuestion);
+
+// 도움말 모달
+function openHelp() {
+  if (!els.helpModal) return;
+  if (els.legendGrid && !els.legendGrid.dataset.filled) {
+    els.legendGrid.innerHTML = COLLECTION_ORDER.map((name) => {
+      const meta = COLLECTION_META[name];
+      const cls = categoryHueClass(name);
+      return `<div class="legend-item ${cls}">
+        <span class="legend-dot"></span>
+        <span class="legend-name">${escapeHtml(meta.ko)}</span>
+        <span class="legend-abbr">${escapeHtml(meta.abbr)}</span>
+      </div>`;
+    }).join("");
+    els.legendGrid.dataset.filled = "1";
+  }
+  els.helpModal.hidden = false;
+  document.body.classList.add("modal-open");
+}
+function closeHelp() {
+  if (!els.helpModal) return;
+  els.helpModal.hidden = true;
+  document.body.classList.remove("modal-open");
+}
+els.helpToggle?.addEventListener("click", () => {
+  if (els.helpModal.hidden) openHelp(); else closeHelp();
+});
+els.helpModal?.querySelectorAll("[data-close]").forEach((el) => {
+  el.addEventListener("click", closeHelp);
+});
+// '?' 키로 도움말 열기/닫기, Esc로 닫기
+document.addEventListener("keydown", (e) => {
+  if (e.key === "?" && !["INPUT", "TEXTAREA"].includes(document.activeElement?.tagName)) {
+    e.preventDefault();
+    if (els.helpModal && els.helpModal.hidden) openHelp(); else closeHelp();
+  }
+  if (e.key === "Escape" && els.helpModal && !els.helpModal.hidden) {
+    closeHelp();
+  }
+});
 
 // 인용 칩 호버 시 떠오르는 툴팁 (전역 단일 요소)
 function showCiteTip(cite, srcCard) {

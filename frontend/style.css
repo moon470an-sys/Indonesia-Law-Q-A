@@ -834,6 +834,158 @@ footer {
   font-size: 12px;
 }
 
+/* ===== 답변 내 마크다운 테이블 ===== */
+.a-table-wrap {
+  overflow-x: auto;
+  margin: 10px 0 14px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+}
+.a-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13.5px;
+}
+.a-table th, .a-table td {
+  padding: 8px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.a-table th {
+  background: var(--panel-2);
+  color: var(--text);
+  font-weight: 600;
+  font-size: 12.5px;
+  letter-spacing: 0.01em;
+}
+.a-table tbody tr:last-child td { border-bottom: none; }
+.a-table tbody tr:hover { background: color-mix(in srgb, var(--accent) 5%, transparent); }
+
+/* ===== 빈 검색 결과 ===== */
+.no-match {
+  text-align: center;
+  padding: 40px 20px 30px;
+  color: var(--muted);
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+}
+.no-match .empty-icon { font-size: 32px; opacity: 0.7; margin-bottom: 6px; }
+.no-match .empty-title { color: var(--text); font-size: 14px; font-weight: 600; margin: 0 0 4px; }
+.no-match .empty-sub { font-size: 12.5px; margin: 0; }
+
+/* ===== 도움말 모달 ===== */
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(2px);
+}
+[data-theme="light"] .modal-backdrop { background: rgba(15, 23, 42, 0.35); }
+.modal-card {
+  position: relative;
+  max-width: 640px;
+  width: 100%;
+  max-height: 80vh;
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 20px 50px -12px rgba(0, 0, 0, 0.6);
+  animation: modal-in 140ms ease-out;
+}
+@keyframes modal-in {
+  from { opacity: 0; transform: translateY(-8px) scale(0.985); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+  border-radius: 12px 12px 0 0;
+  z-index: 1;
+}
+.modal-head h2 { margin: 0; font-size: 15px; font-weight: 600; }
+.modal-body { padding: 16px 20px 20px; }
+body.modal-open { overflow: hidden; }
+
+.help-section { margin-bottom: 18px; }
+.help-section:last-child { margin-bottom: 0; }
+.help-section h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  font-weight: 700;
+}
+.kbd-list {
+  margin: 0;
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  column-gap: 16px;
+  row-gap: 8px;
+  font-size: 13.5px;
+}
+.kbd-list dt { display: flex; gap: 4px; align-items: center; }
+.kbd-list dd { margin: 0; color: var(--text); align-self: center; }
+.help-tips {
+  margin: 0;
+  padding-left: 20px;
+  font-size: 13.5px;
+  line-height: 1.65;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.help-tips strong { color: var(--accent); font-weight: 600; }
+.help-tips em { font-style: normal; color: var(--text); font-weight: 600; }
+
+.legend-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 8px;
+}
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--cat-color, var(--accent));
+  border-radius: 6px;
+  background: var(--panel-2);
+  font-size: 12.5px;
+}
+.legend-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--cat-color, var(--accent));
+  flex-shrink: 0;
+}
+.legend-name { font-weight: 600; color: var(--text); }
+.legend-abbr {
+  margin-left: auto;
+  font-family: ui-monospace, "Cascadia Code", Menlo, monospace;
+  font-size: 11px;
+  color: var(--muted);
+}
+
 /* ===== 위로 스크롤 부동 버튼 ===== */
 .scroll-top {
   position: fixed;
@@ -943,6 +1095,10 @@ footer {
   .kbd-hint { display: none; }
   .cite-tip { display: none !important; }
   .scroll-top { right: 14px; bottom: 14px; width: 38px; height: 38px; font-size: 16px; }
+  .modal { padding: 12px; }
+  .modal-card { max-height: 90vh; }
+  .modal-body { padding: 14px 16px 18px; }
+  .legend-grid { grid-template-columns: repeat(2, 1fr); }
 }
 @media (max-width: 380px) {
   .corpus-grid { grid-template-columns: repeat(2, 1fr); }

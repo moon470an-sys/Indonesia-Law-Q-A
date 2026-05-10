@@ -21,6 +21,7 @@
     <h1>📜 인도네시아 법령 Q&amp;A</h1>
     <div class="topbar-right">
       <div class="status" id="status">백엔드 상태 확인 중…</div>
+      <button id="helpToggle" class="icon-btn" type="button" aria-label="도움말 (단축키 ?)" title="도움말 (?)"><span aria-hidden="true">?</span></button>
       <button id="themeToggle" class="icon-btn" type="button" aria-label="테마 전환" title="라이트/다크 모드 전환">🌙</button>
     </div>
   </header>
@@ -103,6 +104,45 @@
   <div id="citeTip" class="cite-tip" role="tooltip" hidden>
     <div class="cite-tip-meta"></div>
     <div class="cite-tip-snippet"></div>
+  </div>
+
+  <div id="helpModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="helpTitle" hidden>
+    <div class="modal-backdrop" data-close></div>
+    <div class="modal-card">
+      <header class="modal-head">
+        <h2 id="helpTitle">도움말 · 단축키 가이드</h2>
+        <button class="icon-btn" type="button" aria-label="닫기" data-close>✕</button>
+      </header>
+      <div class="modal-body">
+        <section class="help-section">
+          <h3>단축키</h3>
+          <dl class="kbd-list">
+            <dt><kbd>Ctrl</kbd>+<kbd>Enter</kbd></dt><dd>질문 전송</dd>
+            <dt><kbd>Ctrl</kbd>+<kbd>K</kbd></dt><dd>질문 입력창 포커스</dd>
+            <dt><kbd>Esc</kbd></dt><dd>입력창 비우기</dd>
+            <dt><kbd>T</kbd></dt><dd>맨 위로 스크롤</dd>
+            <dt><kbd>?</kbd></dt><dd>이 도움말 열기/닫기</dd>
+          </dl>
+        </section>
+        <section class="help-section">
+          <h3>기능 안내</h3>
+          <ul class="help-tips">
+            <li><strong>법령 코퍼스 카드 클릭</strong> — 검색 범위를 해당 법령으로 한정 (다중 선택). 헤더의 <em>전체 / 해제</em>로 일괄 토글.</li>
+            <li><strong>예시 질문 칩</strong> — 선택한 카테고리에 맞춰 자동 필터링됩니다.</li>
+            <li><strong>인용 칩 호버</strong> — 답변 안의 <span class="cite" style="cursor:default">(Pasal X, 출처: 파일명)</span> 칩에 마우스를 올리면 해당 출처 미리보기가 떠오릅니다. 클릭하면 출처 카드로 이동.</li>
+            <li><strong>과거 질문 클릭</strong> — 입력창에 다시 채워서 변형 질문하기 좋습니다.</li>
+            <li><strong>📋 복사 / 📥 내보내기</strong> — 단일 답변 클립보드 복사, 필터된 히스토리 전체 Markdown 저장.</li>
+            <li><strong>출처 카테고리 필터</strong> — Q&A 카드 안의 작은 칩으로 출처를 카테고리별로 토글.</li>
+            <li><strong>히스토리 검색</strong> — 저장된 모든 Q&A에서 텍스트 검색 (매칭 부분 자동 하이라이트).</li>
+            <li><strong>인쇄/PDF</strong> — <kbd>Ctrl</kbd>+<kbd>P</kbd> 로 깔끔한 보고서 형태로 출력 (UI 청크 자동 숨김).</li>
+          </ul>
+        </section>
+        <section class="help-section">
+          <h3>법령 분류 컬러</h3>
+          <div class="legend-grid" id="legendGrid"></div>
+        </section>
+      </div>
+    </div>
   </div>
 
   <script src="config.js"></script>

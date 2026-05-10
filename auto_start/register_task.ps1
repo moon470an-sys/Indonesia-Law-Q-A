@@ -5,9 +5,9 @@ $ErrorActionPreference = "Stop"
 
 $TaskName = "Indonesia Law RAG"
 $Project  = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$Script   = Join-Path $PSScriptRoot "start_rag.ps1"
+$Script   = Join-Path $PSScriptRoot "watchdog.ps1"
 
-if (-not (Test-Path $Script)) { throw "start_rag.ps1 not found: $Script" }
+if (-not (Test-Path $Script)) { throw "watchdog.ps1 not found: $Script" }
 
 $psArgs = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}"' -f $Script
 
@@ -24,7 +24,9 @@ $settings = New-ScheduledTaskSettingsSet `
     -DontStopIfGoingOnBatteries `
     -StartWhenAvailable `
     -ExecutionTimeLimit ([TimeSpan]::Zero) `
-    -MultipleInstances IgnoreNew
+    -MultipleInstances IgnoreNew `
+    -RestartCount 99 `
+    -RestartInterval (New-TimeSpan -Minutes 1)
 
 $principal = New-ScheduledTaskPrincipal `
     -UserId "$env:USERDOMAIN\$env:USERNAME" `
@@ -37,7 +39,7 @@ Register-ScheduledTask `
     -Trigger $trigger `
     -Settings $settings `
     -Principal $principal `
-    -Description "Indonesia Law RAG: starts uvicorn + cloudflared on logon" `
+    -Description "Indonesia Law RAG: long-running watchdog (uvicorn + cloudflared + tunnel publish)" `
     -Force | Out-Null
 
 Write-Output "[OK] Task Scheduler registered: $TaskName"

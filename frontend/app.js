@@ -19,19 +19,32 @@ const els = {
   status: document.getElementById("status"),
 };
 
-function loadSettings() {
+async function fetchAutoUrl() {
+  try {
+    const r = await fetch(`tunnel.json?t=${Date.now()}`, { cache: "no-store" });
+    if (!r.ok) return "";
+    const data = await r.json();
+    return (data.url || "").trim().replace(/\/+$/, "");
+  } catch {
+    return "";
+  }
+}
+
+async function loadSettings() {
   const cfg = window.APP_CONFIG || {};
 
-  // 데스크톱 바로가기에서 ?api=https://...trycloudflare.com 으로 들어왔으면 우선 적용
   const params = new URLSearchParams(location.search);
   const urlFromQuery = params.get("api");
   if (urlFromQuery) {
     localStorage.setItem(LS_KEYS.url, urlFromQuery);
-    // URL 깔끔하게 — 쿼리 제거 후 history 교체 (토큰은 절대 URL에 들어가지 않음)
     history.replaceState(null, "", location.pathname);
   }
 
-  els.apiUrl.value = localStorage.getItem(LS_KEYS.url) || cfg.defaultApiUrl || "";
+  const storedUrl = localStorage.getItem(LS_KEYS.url) || "";
+  const autoUrl = await fetchAutoUrl();
+
+  // 우선순위: localStorage(사용자 명시) > tunnel.json(자동) > config 기본값
+  els.apiUrl.value = storedUrl || autoUrl || cfg.defaultApiUrl || "";
   els.apiToken.value = localStorage.getItem(LS_KEYS.token) || "";
   els.topK.value = localStorage.getItem(LS_KEYS.topK) || cfg.defaultTopK || 5;
 }
@@ -58,16 +71,21 @@ function authHeaders() {
   return h;
 }
 
+async function tryHealthOnce(base) {
+  const r = await fetch(`${base}/health`, { headers: authHeaders() });
+  const data = await r.json();
+  return data;
+}
+
 async function checkHealth() {
-  const base = apiBase();
+  let base = apiBase();
   if (!base) {
     setStatus("백엔드 URL을 먼저 입력하세요", "err");
     return;
   }
+  setStatus("연결 확인 중…", "info");
   try {
-    setStatus("연결 확인 중…", "info");
-    const r = await fetch(`${base}/health`, { headers: authHeaders() });
-    const data = await r.json();
+    const data = await tryHealthOnce(base);
     if (data.ok && data.collection_count > 0) {
       setStatus(`연결 OK · 청크 ${data.collection_count}개 로드됨`, "ok");
     } else if (data.ok) {
@@ -75,7 +93,30 @@ async function checkHealth() {
     } else {
       setStatus(`서버 오류: ${data.error || "unknown"}`, "err");
     }
+    return;
   } catch (e) {
+    // 첫 실패: tunnel.json refetch 후 재시도. 사용자가 수동 입력한 URL이 아니라면 자동 갱신.
+    const stored = localStorage.getItem(LS_KEYS.url) || "";
+    const newAuto = await fetchAutoUrl();
+    if (newAuto && newAuto !== base && (!stored || stored === base)) {
+      els.apiUrl.value = newAuto;
+      localStorage.removeItem(LS_KEYS.url);
+      setStatus(`URL 자동 갱신 (${newAuto}) 재시도 중…`, "info");
+      try {
+        const data = await tryHealthOnce(newAuto);
+        if (data.ok && data.collection_count > 0) {
+          setStatus(`연결 OK · 청크 ${data.collection_count}개 로드됨`, "ok");
+        } else if (data.ok) {
+          setStatus("연결 OK · DB 비어있음 (ingest.py 실행 필요)", "warn");
+        } else {
+          setStatus(`서버 오류: ${data.error || "unknown"}`, "err");
+        }
+        return;
+      } catch (e2) {
+        setStatus(`연결 실패 (자동 갱신 후도): ${e2.message}`, "err");
+        return;
+      }
+    }
     setStatus(`연결 실패: ${e.message}`, "err");
   }
 }
@@ -185,5 +226,4 @@ els.question.addEventListener("keydown", (e) => {
   }
 });
 
-loadSettings();
-checkHealth();
+loadSettings().then(() => checkHealth());

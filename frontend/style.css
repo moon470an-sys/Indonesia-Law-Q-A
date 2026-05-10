@@ -704,6 +704,27 @@ kbd {
   font-family: ui-monospace, "Cascadia Code", Menlo, monospace;
   font-weight: 500;
 }
+.law-ref {
+  display: inline;
+  background: color-mix(in srgb, var(--cat-color, var(--accent)) 10%, transparent);
+  color: var(--cat-color, var(--accent));
+  border-bottom: 1.5px solid color-mix(in srgb, var(--cat-color, var(--accent)) 55%, transparent);
+  padding: 0 3px;
+  border-radius: 3px;
+  font-weight: 600;
+  white-space: nowrap;
+  transition: background 120ms ease;
+}
+.law-ref:hover { background: color-mix(in srgb, var(--cat-color, var(--accent)) 22%, transparent); }
+.law-ref.law-art { --cat-color: var(--accent); }
+/* 인용 칩 안의 law-ref는 시각적 잡음 줄이기 */
+.cite .law-ref {
+  background: transparent;
+  color: inherit;
+  border-bottom: none;
+  padding: 0;
+  font-weight: 700;
+}
 .qa .a .a-bq {
   margin: 8px 0 12px;
   padding: 8px 12px 8px 14px;
@@ -971,6 +992,16 @@ kbd {
 @keyframes shimmer {
   0%   { background-position: 220% 0; }
   100% { background-position: -100% 0; }
+}
+
+/* ===== 신규 답변 카드 펄스 ===== */
+.qa-fresh {
+  animation: qa-fresh-pulse 1.4s ease-out;
+}
+@keyframes qa-fresh-pulse {
+  0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 55%, transparent); }
+  60%  { box-shadow: 0 0 0 14px color-mix(in srgb, var(--accent) 0%, transparent); }
+  100% { box-shadow: 0 0 0 0 transparent; }
 }
 
 /* ===== 검색어 하이라이트 ===== */

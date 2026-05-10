@@ -347,21 +347,41 @@ function escapeHtml(s) {
 // 인용 패턴: (Pasal 6A, 출처: 파일명) 또는 (출처: 파일명) → 칩 처리.
 const CITE_RE = /\(([^()]*?(?:Pasal|출처)[^()]*?)\)/g;
 
+// 인도네시아 법령 참조 패턴 강조 (분류별 컬러)
+const LAW_REF_PATTERNS = [
+  // UUD 1945, UUD NRI 1945
+  { re: /\bUUD(?:\s+NRI)?\s+\d{4}\b/g, cls: "cat-uud" },
+  // UU 13/2003, UU No.13/2003, UU Nomor 13 Tahun 2003
+  { re: /\bUU(?:\s+(?:No\.?|Nomor))?\s*\d+(?:\s+Tahun\s+\d{4}|\/\d{4})\b/g, cls: "cat-uu" },
+  // PP 5/2021, PP No. 5/2021
+  { re: /\bPP(?:\s+(?:No\.?|Nomor))?\s*\d+(?:\s+Tahun\s+\d{4}|\/\d{4})\b/g, cls: "cat-pp" },
+  { re: /\bPerpres(?:\s+(?:No\.?|Nomor))?\s*\d+(?:\s+Tahun\s+\d{4}|\/\d{4})\b/gi, cls: "cat-perpres" },
+  { re: /\bPermen[a-zA-Z]*\s*(?:No\.?\s*)?\d+(?:\s+Tahun\s+\d{4}|\/\d{4})\b/gi, cls: "cat-permen" },
+  { re: /\bKepmen[a-zA-Z]*\s*(?:No\.?\s*)?\d+(?:\s+Tahun\s+\d{4}|\/\d{4})\b/gi, cls: "cat-kepmen" },
+  { re: /\bPerda(?:\s+(?:No\.?|Nomor))?\s*\d+(?:\s+Tahun\s+\d{4}|\/\d{4})\b/gi, cls: "cat-perda" },
+  // Pasal 6, Pasal 6A, Pasal 6 ayat (2)
+  { re: /\bPasal\s+\d+[A-Z]?(?:\s+ayat\s+\(\d+\))?\b/g, cls: "law-art" },
+];
+
 function renderInline(line) {
   // 먼저 escape, 그 다음 안전한 인라인 마크다운만 변환.
   let out = escapeHtml(line);
   // **bold**
   out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-  // *italic* (단일 별표, **bold** 매칭 후 남은 것)
+  // *italic*
   out = out.replace(/(?<![*\w])\*([^*\n]+?)\*(?!\w)/g, '<em>$1</em>');
-  // `inline code` — Pasal 6A 같은 조항 인용을 강조하기 좋음
+  // `inline code`
   out = out.replace(/`([^`]+)`/g, '<code class="ic">$1</code>');
-  // 외부 URL 자동 링크화 (인용 칩 변환 전에 해야 () 안 URL도 처리)
+  // 인도네시아 법령 패턴 자동 강조 (카테고리별 컬러)
+  for (const { re, cls } of LAW_REF_PATTERNS) {
+    out = out.replace(re, (m) => `<span class="law-ref ${cls}">${m}</span>`);
+  }
+  // 외부 URL 자동 링크화
   out = out.replace(/(?<![">])(https?:\/\/[^\s<)]+[^\s<.,;:!?)])/g,
     '<a href="$1" target="_blank" rel="noopener noreferrer" class="a-link">$1</a>');
-  // [1], [2] 형태의 출처 인덱스 → 클릭 가능한 ref 칩 (출처 카드로 점프)
+  // [1], [2] 출처 인덱스 → ref 칩
   out = out.replace(/\[(\d{1,2})\]/g, '<a href="#" class="src-ref" data-idx="$1">[$1]</a>');
-  // (Pasal X, 출처: ...) → 인용 칩
+  // (Pasal X, 출처: ...) → 인용 칩 (이미 law-ref로 감싸진 Pasal 텍스트가 () 안에 있어도 무방)
   out = out.replace(CITE_RE, '<span class="cite">$1</span>');
   return out;
 }
@@ -858,11 +878,19 @@ function addHistoryItem(item) {
   if (historyItems.length > HISTORY_LIMIT) historyItems.length = HISTORY_LIMIT;
   saveHistoryItems(historyItems);
   const sortMode = els.historySort?.value || "latest";
+  let newCard;
   if (sortMode === "latest") {
     if (els.history.querySelector(".empty-state")) els.history.innerHTML = "";
-    els.history.prepend(buildQaCard(item));
+    newCard = buildQaCard(item);
+    els.history.prepend(newCard);
   } else {
     renderHistoryAll();
+    newCard = els.history.querySelector(`[data-id="${CSS.escape(item.id)}"]`);
+  }
+  // 새 카드 도착 펄스 (1회)
+  if (newCard) {
+    newCard.classList.add("qa-fresh");
+    setTimeout(() => newCard.classList.remove("qa-fresh"), 1400);
   }
   applyHistoryFilter();
   updateHistoryToolbar();

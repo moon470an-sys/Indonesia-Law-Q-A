@@ -76,13 +76,15 @@ function Stop-AllCloudflared {
 }
 
 function Invoke-HealthPrewarm {
-    # 새 uvicorn 기동 직후 /health 캐시를 채워둠 → 사용자 첫 요청이 cold start 80s를 떠안지 않음.
+    # 새 uvicorn 기동 직후 /health(slow path)를 한 번 호출해 캐시를 채워둠.
+    # FastAPI의 sync def → anyio threadpool로 위임돼서 이벤트루프 안 막고 캐시만 채움.
+    # 사용자 첫 요청은 cache hit으로 즉답.
     try {
-        Invoke-WebRequest -Uri "http://127.0.0.1:8000/health/prewarm" `
-            -Method POST -UseBasicParsing -TimeoutSec 10 | Out-Null
-        Write-WLog "  /health prewarm triggered"
+        $r = Invoke-WebRequest -Uri "http://127.0.0.1:8000/health" `
+            -UseBasicParsing -TimeoutSec 300
+        Write-WLog "  /health prewarm OK ($($r.StatusCode), bytes=$($r.Content.Length))"
     } catch {
-        Write-WLog "  /health prewarm call failed: $_"
+        Write-WLog "  /health prewarm failed: $_"
     }
 }
 

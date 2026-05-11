@@ -80,7 +80,8 @@ _state: dict[str, Any] = {
     "health_cache_ts": 0.0,       # 마지막 갱신 시각 (epoch)
 }
 
-HEALTH_CACHE_TTL = 300.0  # /health 캐시 TTL (5분). count()가 80s+ 걸리는 cold start 비용을 사용자에게 노출시키지 않음.
+HEALTH_CACHE_TTL = 86400.0  # 24h. 청크 수는 ingest가 돌 때만 변하고, ingest는 uvicorn 재시작을 동반 → 캐시도 자연히 초기화.
+# 5분 같은 짧은 TTL이면 만료 후 frontend가 다시 warming=true를 받게 되고 자동 복구 경로가 길어짐.
 
 
 def get_model() -> SentenceTransformer:
@@ -231,11 +232,11 @@ def healthz() -> dict[str, Any]:
 
 @app.get("/health")
 def health(quick: int = 0) -> dict[str, Any]:
-    """기본 모드: 캐시 있으면 캐시, 없으면 동기 count() (cold 80s).
+    """기본 모드: 캐시 fresh면 캐시, 아니면 동기 count() (cold 80s+).
 
-    quick=1: 캐시 있으면 즉답, 없으면 `warming=true` 즉답 (count는 호출하지 않음).
-    watchdog가 uvicorn healthy 직후 별도로 일반 /health를 호출해 캐시를 채워둠.
-    프론트는 quick=1 → warming 응답 받으면 잠시 후 재호출 → 캐시 hit이면 정상 응답.
+    quick=1: 캐시가 있으면(stale 포함) 그걸 반환, 정말 없을 때만 `warming=true` 즉답.
+      watchdog가 uvicorn healthy 직후 별도로 일반 /health를 호출해 캐시를 채워둠.
+      stale을 응답하더라도 청크 수 표시용으로는 충분함. 변동은 ingest 후에만 발생.
     """
     cached = _state.get("health_cache")
     cached_ts = _state.get("health_cache_ts", 0.0)
@@ -245,7 +246,10 @@ def health(quick: int = 0) -> dict[str, Any]:
         return cached
 
     if quick:
-        # 캐시 없음/만료 → 즉답 (백그라운드 thread는 만들지 않음. GIL 경합으로 /healthz hang됨.)
+        # 캐시 fresh가 아닐 때: stale이라도 있으면 반환 (사용자 경험 우선).
+        # 정말 캐시가 없을 때만 warming=true.
+        if cached is not None:
+            return {**cached, "stale": True}
         return {
             "ok": True,
             "warming": True,

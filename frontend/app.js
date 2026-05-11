@@ -181,21 +181,35 @@ function apiBase() {
 }
 
 function authHeaders() {
+  // POST/PUT 등 body를 보내는 호출용 (Content-Type + 옵션 토큰)
   const h = { "Content-Type": "application/json" };
   if (els.apiToken.value) h["X-Api-Token"] = els.apiToken.value;
   return h;
 }
 
+function getHeaders() {
+  // GET 호출용: Content-Type을 안 박아서 CORS preflight 회피.
+  // 토큰이 있을 때만 X-Api-Token을 보냄 (없으면 preflight 자체 없음).
+  // 토큰이 있어도 헤더가 하나만 있으면 그 헤더가 simple/non-simple인지에 따라 preflight 발생할 수 있음.
+  // X-Api-Token은 custom header라 항상 preflight 발생 → 토큰 있을 때만 부담.
+  if (els.apiToken.value) return { "X-Api-Token": els.apiToken.value };
+  return undefined;  // headers 자체 미설정 → 100% simple GET → preflight 없음
+}
+
 async function tryHealthOnce(base) {
-  // quick=1 → 서버는 캐시 있으면 캐시, 없으면 warming=true 즉답하면서 백그라운드 prewarm.
-  // 8s timeout: 죽은 URL에 묶여 화면이 "확인 중..." 상태로 30s+ 멈추지 않게.
-  const r = await fetchWithTimeout(`${base}/health?quick=1`, { headers: authHeaders() }, 8000);
+  // quick=1 → 서버는 캐시 있으면 캐시, 없으면 warming=true 즉답.
+  // 15s timeout: cloudflared QuickTunnel은 가끔 preflight + GET이 도합 5-10s 걸림.
+  // 8s timeout이면 정상 응답도 abort돼서 "signal is aborted without reason" 에러로 표시됨.
+  const opts = {};
+  const h = getHeaders();
+  if (h) opts.headers = h;
+  const r = await fetchWithTimeout(`${base}/health?quick=1`, opts, 15000);
   const data = await r.json();
   // warming 응답이면 잠시 후 한번 더 (캐시 채워졌을 가능성). 실패해도 warming 결과 그대로 반환.
   if (data && data.warming) {
     await new Promise((r) => setTimeout(r, 2500));
     try {
-      const r2 = await fetchWithTimeout(`${base}/health?quick=1`, { headers: authHeaders() }, 8000);
+      const r2 = await fetchWithTimeout(`${base}/health?quick=1`, opts, 15000);
       const d2 = await r2.json();
       if (d2 && !d2.warming) return d2;
     } catch {}

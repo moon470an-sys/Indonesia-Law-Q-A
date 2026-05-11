@@ -1,4 +1,4 @@
-# Indonesia Law RAG - long-running watchdog
+﻿# Indonesia Law RAG - long-running watchdog
 # uvicorn + cloudflared 살아있게 유지, 터널 URL 자동 publish (frontend/tunnel.json -> GitHub Pages).
 # Task Scheduler logon trigger로 한 번 실행. 죽으면 자동 재시작 (Restart on failure).
 
@@ -189,6 +189,8 @@ $currentTunnel = ""
 if (Test-Path $TunnelTxt) { $currentTunnel = (Get-Content $TunnelTxt -Raw).Trim() }
 Write-WLog "boot: known tunnel = $currentTunnel"
 
+$lastHealthRefresh = [DateTime]::MinValue
+
 while ($true) {
     try {
         $uvOk = Test-UvicornHealth
@@ -199,10 +201,25 @@ while ($true) {
         }
         if (-not $uvOk) {
             Write-WLog "uvicorn DOWN (2 consecutive checks failed), restarting"
+            $lastHealthRefresh = [DateTime]::MinValue  # 새 uvicorn이면 prewarm이 새로 채움
             if (-not (Start-Uvicorn)) {
                 Write-WLog "uvicorn restart failed; sleep 60s and retry"
                 Start-Sleep -Seconds 60
                 continue
+            }
+            $lastHealthRefresh = Get-Date  # Start-Uvicorn 내부에서 prewarm 호출됨
+        }
+
+        # /health keep-alive: 4분에 한 번씩 호출해서 캐시 TTL 안에서 갱신.
+        # 옛 uvicorn(TTL=300)이든 새 uvicorn(TTL=86400)이든 캐시가 만료 직전에 채워짐.
+        # 그러면 사용자가 /health?quick=1 호출해도 항상 cache hit (warming=false).
+        if (((Get-Date) - $lastHealthRefresh).TotalMinutes -ge 4) {
+            try {
+                Invoke-WebRequest -Uri "http://127.0.0.1:8000/health" -UseBasicParsing -TimeoutSec 60 | Out-Null
+                $lastHealthRefresh = Get-Date
+                # 정상 시엔 로그 안 남김 (4분마다 노이즈 방지). 실패할 때만 기록.
+            } catch {
+                Write-WLog "  /health keep-alive failed: $_"
             }
         }
 

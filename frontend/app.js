@@ -1186,10 +1186,10 @@ async function askQuestion() {
 
   els.askBtn.disabled = true;
   els.askBtn.textContent = "답변 생성 중…";
-  const scope = selectedCategories.size
+  const scopeLabel = selectedCategories.size
     ? [...selectedCategories].map((n) => COLLECTION_META[n]?.ko || n).join(", ")
     : "전체 법령";
-  setStatus(`Claude가 ${scope} 문서를 검토하는 중…`, "info");
+  setStatus(`Claude가 ${scopeLabel} 문서를 검토하는 중…`, "info");
 
   const t0 = performance.now();
   const scope = [...selectedCategories];

@@ -20,9 +20,7 @@ os.environ.setdefault("TRANSFORMERS_CACHE", str(_DEFAULT_CACHE / "transformers")
 os.environ.setdefault("SENTENCE_TRANSFORMERS_HOME", str(_DEFAULT_CACHE / "sentence_transformers"))
 os.environ.setdefault("TORCH_HOME", str(_DEFAULT_CACHE / "torch"))
 
-import chromadb
 from anthropic import Anthropic
-from chromadb.config import Settings
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -32,7 +30,13 @@ from sentence_transformers import SentenceTransformer
 PROJECT_DIR = Path(__file__).resolve().parent
 load_dotenv(PROJECT_DIR / ".env")
 
-CHROMA_DIR = Path(os.getenv("RAG_CHROMA_DIR", r"D:\rag_data\chroma_db"))
+# ChromaDB 클라이언트 팩토리. HttpClient(기본) / PersistentClient 모드 분기는 rag_chroma 모듈에서.
+from rag_chroma import (
+    CHROMA_MODE,
+    CHROMA_PATH as CHROMA_DIR,  # 기존 식별자 유지 (호환). /health 응답에서 dir 존재 여부 표시용.
+    describe_target,
+    get_chroma_client,
+)
 COLLECTION_NAME = "indonesia_constitution"
 EMBEDDING_MODEL = os.getenv(
     "RAG_EMBEDDING_MODEL",
@@ -91,16 +95,14 @@ def get_model() -> SentenceTransformer:
 
 
 def get_client():
-    """ChromaDB PersistentClient (싱글톤). 컬렉션은 매번 list_collections로 동적 조회."""
+    """ChromaDB 클라이언트 (싱글톤).
+
+    실제 인스턴스 종류(HttpClient / PersistentClient)는 RAG_CHROMA_MODE에 따라
+    rag_chroma.get_chroma_client()가 결정한다. 컬렉션은 매번 list_collections로
+    동적 조회.
+    """
     if _state["client"] is None:
-        if not CHROMA_DIR.exists():
-            raise RuntimeError(
-                f"ChromaDB 디렉토리가 없습니다: {CHROMA_DIR}. 먼저 인덱싱 스크립트를 실행하세요."
-            )
-        _state["client"] = chromadb.PersistentClient(
-            path=str(CHROMA_DIR),
-            settings=Settings(anonymized_telemetry=False),
-        )
+        _state["client"] = get_chroma_client()
     return _state["client"]
 
 
@@ -253,14 +255,16 @@ def health(quick: int = 0) -> dict[str, Any]:
         return {
             "ok": True,
             "warming": True,
-            "chroma_dir_exists": CHROMA_DIR.exists(),
+            "chroma_mode": CHROMA_MODE,
+            "chroma_target": describe_target(),
             "anthropic_key_set": bool(ANTHROPIC_API_KEY),
         }
 
     # 동기 모드 (캐시 채움까지 대기). FastAPI sync def → anyio threadpool에서 실행 → 이벤트루프 안 막음.
     info: dict[str, Any] = {
         "ok": True,
-        "chroma_dir_exists": CHROMA_DIR.exists(),
+        "chroma_mode": CHROMA_MODE,
+        "chroma_target": describe_target(),
         "anthropic_key_set": bool(ANTHROPIC_API_KEY),
     }
     try:

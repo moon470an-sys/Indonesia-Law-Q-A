@@ -21,16 +21,16 @@ os.environ.setdefault("TRANSFORMERS_CACHE", str(_DEFAULT_CACHE / "transformers")
 os.environ.setdefault("SENTENCE_TRANSFORMERS_HOME", str(_DEFAULT_CACHE / "sentence_transformers"))
 os.environ.setdefault("TORCH_HOME", str(_DEFAULT_CACHE / "torch"))
 
-import chromadb
 import pdfplumber
-from chromadb.config import Settings
 from sentence_transformers import SentenceTransformer
+
+# rag_chroma 헬퍼: HttpClient(기본) / PersistentClient 모드 분기.
+from rag_chroma import CHROMA_MODE, CHROMA_PATH as CHROMA_DIR, describe_target, get_chroma_client
 
 SOURCE_DIR = Path(
     os.getenv("RAG_SOURCE_DIR", r"D:\인도네시아 법령 원문\헌법")
 )
 PROJECT_DIR = Path(__file__).resolve().parent
-CHROMA_DIR = Path(os.getenv("RAG_CHROMA_DIR", r"D:\rag_data\chroma_db"))
 COLLECTION_NAME = "indonesia_constitution"
 EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
 
@@ -118,12 +118,11 @@ def main() -> int:
     print(f"      (HF cache: {os.environ.get('HF_HOME')})")
     model = SentenceTransformer(EMBEDDING_MODEL)
 
-    print(f"[2/4] ChromaDB 초기화: {CHROMA_DIR}")
-    CHROMA_DIR.mkdir(parents=True, exist_ok=True)
-    client = chromadb.PersistentClient(
-        path=str(CHROMA_DIR),
-        settings=Settings(anonymized_telemetry=False),
-    )
+    print(f"[2/4] ChromaDB 초기화: mode={CHROMA_MODE} target={describe_target()}")
+    # persistent 모드일 때만 디렉터리 생성. http 모드는 서버가 관리.
+    if CHROMA_MODE == "persistent":
+        CHROMA_DIR.mkdir(parents=True, exist_ok=True)
+    client = get_chroma_client()
     try:
         client.delete_collection(COLLECTION_NAME)
     except Exception:

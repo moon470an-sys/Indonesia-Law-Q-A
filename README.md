@@ -82,7 +82,29 @@ ALLOWED_ORIGINS=https://moon470an-sys.github.io,http://localhost:8501,http://127
 [Convert]::ToBase64String((1..32 | ForEach-Object { Get-Random -Max 256 } | ForEach-Object { [byte]$_ }))
 ```
 
-### 2-3. 헌법 PDF 인덱싱
+### 2-3. ChromaDB 서버 (별도 데몬, 권장)
+
+기본값 `RAG_CHROMA_MODE=http`에서는 `rag_server`와 ingest가 **별도 ChromaDB 서버 프로세스**에 접속합니다. 그래야 `rag_server` 재시작이 10GB 인덱스 reload 없이 즉시 끝납니다.
+
+수동으로 띄울 때:
+```powershell
+.\.venv\Scripts\chroma.exe run --path D:\rag_data\chroma_db --host 127.0.0.1 --port 8001
+```
+
+**Windows 서비스로 영구 등록 (권장)** — `NSSM`을 사용합니다.
+
+```powershell
+winget install --id NSSM.NSSM            # NSSM 1회 설치
+.\scripts\install_chroma_service.bat     # 관리자 cmd/PowerShell 에서
+nssm start ChromaDB-IndonesiaLaw         # 즉시 시작
+sc query ChromaDB-IndonesiaLaw           # 상태 확인
+```
+
+서비스 등록 후엔 PC 로그온/재부팅 시 자동 시작되고, 죽으면 5초 후 자동 재시작됩니다. 로그는 `logs\chroma_service.log` / `.err`.
+
+`persistent` 모드로 되돌리려면 `.env`에서 `RAG_CHROMA_MODE=persistent`로 변경하고 `rag_server`를 재시작.
+
+### 2-4. 헌법 PDF 인덱싱
 
 대상 폴더: `D:\인도네시아 법령 원문\헌법` (이미 존재)
 
@@ -92,7 +114,7 @@ python ingest.py
 
 처음 실행 시 임베딩 모델(약 1GB)이 `D:\hf_cache`에 다운로드됩니다.
 
-### 2-4. FastAPI 서버 실행
+### 2-5. FastAPI 서버 실행
 
 ```powershell
 uvicorn rag_server:app --host 127.0.0.1 --port 8000
@@ -265,3 +287,46 @@ Get-Content "logs\start.log" -Tail 20
 - 컬렉션을 법령 종류별로 분리 (`indonesia_constitution`, `indonesia_uu`, …)
 - 재순위 모델(reranker) 추가로 검색 품질 향상
 - Cloudflare Access로 이메일 인증 추가 (본인만 접근)
+
+---
+
+## 10. ChromaDB 마이그레이션 (PersistentClient → HttpClient)
+
+`rag_server.py`와 ingest 스크립트가 같은 프로세스 안에서 ChromaDB(10GB)를 직접 매핑하던 구조에서, 별도 데몬으로 분리합니다. **uvicorn 재시작 시 데이터 reload를 없애는** 게 목적입니다 (재시작 ~30분 → 수 초).
+
+### 절차
+
+1. `.venv`에 chromadb가 설치돼 있는지 확인 (`.venv\Scripts\chroma.exe` 존재).
+2. NSSM 설치 후 ChromaDB 서비스 등록:
+   ```powershell
+   winget install --id NSSM.NSSM
+   .\scripts\install_chroma_service.bat   # 관리자 권한
+   nssm start ChromaDB-IndonesiaLaw
+   ```
+3. `chroma run`은 기존 `D:\rag_data\chroma_db\` 디렉터리를 그대로 읽으므로 **재인덱싱 불필요**.
+4. `.env`를 다음으로 갱신:
+   ```
+   RAG_CHROMA_MODE=http
+   RAG_CHROMA_HOST=127.0.0.1
+   RAG_CHROMA_PORT=8001
+   ```
+5. 컬렉션 8개가 그대로 보이는지 확인 (예: PowerShell):
+   ```powershell
+   curl http://127.0.0.1:8001/api/v1/collections   # ChromaDB v0.4.x
+   # 또는
+   curl http://127.0.0.1:8001/api/v2/collections   # v0.5+
+   ```
+   응답에 `indonesia_uud / indonesia_uu / indonesia_pp / indonesia_perpres / indonesia_permen / indonesia_kepmen / indonesia_perda / indonesia_lainnya` 8개가 나오면 정상.
+6. `rag_server`를 재시작 (`Restart-Service` / watchdog의 uvicorn 재기동). 이제 uvicorn은 ChromaDB를 메모리에 매핑하지 않으므로 **수 초 안에 healthy**.
+
+### 롤백
+
+문제 발생 시 `.env`에서 한 줄만 바꾸고 `rag_server` 재시작:
+```
+RAG_CHROMA_MODE=persistent
+```
+기존 PersistentClient 경로가 fallback으로 살아 있으므로 즉시 원복.
+
+### 알려진 호환 이슈
+
+- ChromaDB 클라이언트 버전과 서버(`chroma run`) 버전이 다르면 컬렉션 포맷 mismatch 가능. `rag_server` 시작 로그에 `client_ver=… server_ver=…`이 찍히고 다르면 경고. 같은 `.venv`의 `chroma.exe`로 서버를 띄우면 항상 일치.

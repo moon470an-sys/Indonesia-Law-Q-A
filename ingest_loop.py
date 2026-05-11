@@ -13,6 +13,16 @@ import os
 import re
 import sys
 import time
+
+# Windows 기본 콘솔(cp949)에서 ↻ ✓ 등 unicode 출력 시 UnicodeEncodeError로 cycle이
+# 죽는 것을 방지. 워커처럼 stdout/stderr를 UTF-8로 강제.
+for _stream_name in ("stdout", "stderr"):
+    _s = getattr(sys, _stream_name, None)
+    if _s is not None and hasattr(_s, "reconfigure"):
+        try:
+            _s.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -22,11 +32,13 @@ from index_manager import (
     FileEntry, Manifest,
     discover_pdfs, hash_file, make_chunk_id, normalize_category,
     parse_pdf_worker,
+    MAX_PDF_BYTES,
 )
 
-import chromadb
-from chromadb.config import Settings
 from sentence_transformers import SentenceTransformer
+
+# rag_chroma 헬퍼: HttpClient(기본) / PersistentClient 모드 분기.
+from rag_chroma import CHROMA_MODE, describe_target, get_chroma_client
 
 EMBEDDING_MODEL = os.getenv(
     "RAG_EMBEDDING_MODEL",
@@ -42,6 +54,8 @@ BATCH_SIZE = int(os.getenv("RAG_BATCH_SIZE", "200"))
 PARSE_TIMEOUT = int(os.getenv("RAG_PARSE_TIMEOUT", "120"))
 # upsert를 누적해서 보낼 청크 임계치
 UPSERT_FLUSH_CHUNKS = int(os.getenv("RAG_UPSERT_FLUSH_CHUNKS", "2048"))
+# ChromaDB upsert 한 번 호출당 최대 청크 (ChromaDB 내부 제한 5461 미만으로)
+UPSERT_BATCH_LIMIT = int(os.getenv("RAG_UPSERT_BATCH_LIMIT", "5000"))
 
 # 메인 프로세스는 임베딩하지 않으므로 BLAS 스레드 적게
 os.environ.setdefault("OMP_NUM_THREADS", "2")
@@ -109,22 +123,38 @@ def detect_changes(manifest: Manifest):
     deleted = sorted(manifest_paths - set(current.keys()))
 
     pending: list[tuple[Path, str, str, int, float]] = []  # (path, category, sha, size, mtime)
+    retried = 0
+    skipped_oversize = 0
     for path_str, (pdf_path, category, size, mtime) in current.items():
         e = manifest.entries.get(path_str)
-        if e and e.size == size and abs(e.mtime - mtime) < 1.0:
-            continue  # unchanged
+        # chunk_count==0은 이전 사이클에서 파싱/임베딩이 실패한 엔트리.
+        # size+mtime이 같아도 재시도해야 한다 (워커 OOM·BrokenProcessPool 등 일과성 실패 회수).
+        prev_failed = bool(e and e.chunk_count == 0)
+        # 단, MAX_PDF_BYTES 초과 oversize 파일은 워커에서 항상 fail이므로 영구 스킵 —
+        # 매 사이클마다 워커 슬롯·시간을 낭비하지 않도록.
+        if prev_failed and size > MAX_PDF_BYTES:
+            skipped_oversize += 1
+            continue
+        if e and e.size == size and abs(e.mtime - mtime) < 1.0 and not prev_failed:
+            continue  # unchanged & 정상 인덱싱됨
         # 의심되면 hash 계산
         try:
             sha, size2, mtime2 = hash_file(pdf_path)
         except OSError as exc:
             log(f"  ! hash 실패 {pdf_path.name}: {exc}")
             continue
-        if e and e.sha256 == sha:
+        if e and e.sha256 == sha and not prev_failed:
             # 내용 동일 (touch만 됨) — manifest mtime만 갱신
             e.mtime = mtime2
             manifest.upsert(e)
             continue
+        if prev_failed:
+            retried += 1
         pending.append((pdf_path, category, sha, size2, mtime2))
+    if retried:
+        log(f"  ↻ 이전 실패 엔트리 재시도 대상: {retried}개")
+    if skipped_oversize:
+        log(f"  ⊘ oversize 영구 스킵: {skipped_oversize}개 (>{MAX_PDF_BYTES//1024//1024}MB)")
     return pending, deleted
 
 
@@ -217,16 +247,21 @@ def index_files(
 
         success_collections = set()
         for col_name, g in groups.items():
+            n = len(g["ids"])
             try:
                 col = get_col(col_name)
-                col.upsert(
-                    ids=g["ids"], documents=g["texts"],
-                    metadatas=g["metas"], embeddings=g["embs"],
-                )
+                # ChromaDB max_batch_size(=5461) 초과 방지: 5000 단위로 분할 upsert.
+                # 동일 id에 대한 upsert는 idempotent하므로 부분 성공 후 재시도 안전.
+                for i in range(0, n, UPSERT_BATCH_LIMIT):
+                    j = min(i + UPSERT_BATCH_LIMIT, n)
+                    col.upsert(
+                        ids=g["ids"][i:j], documents=g["texts"][i:j],
+                        metadatas=g["metas"][i:j], embeddings=g["embs"][i:j],
+                    )
                 success_collections.add(col_name)
             except Exception as exc:
                 errors += 1
-                log(f"  ! upsert 실패 [{col_name}] ({len(g['ids'])}청크): {type(exc).__name__}: {exc}")
+                log(f"  ! upsert 실패 [{col_name}] ({n}청크): {type(exc).__name__}: {exc}")
 
         for f in buffer_files:
             if f["collection"] in success_collections:
@@ -331,17 +366,26 @@ def cycle(manifest: Manifest, client, model: SentenceTransformer) -> dict:
     removed = remove_deleted(manifest, client, deleted) if deleted else 0
     if deleted:
         log(f"  삭제 감지: 파일 {len(deleted)}개 / 청크 {removed}개 제거")
+    # 처리 순서: (a) 신규 미인덱스(manifest에 없음) 우선 → (b) 그 다음 size 작은 것 먼저.
+    # 신규 PDF가 사용자가 가장 빨리 보고 싶어할 결과이고, 작은 파일은 워커 한 슬롯을
+    # 짧게 점유해서 큰 파일이 끼어 있어도 throughput을 안정화한다.
+    manifest_paths = manifest.all_paths()
+    pending.sort(key=lambda x: (str(x[0]) in manifest_paths, x[3]))
+    total_files = total_chunks = total_errs = 0
     if pending:
-        log(f"  처리 대상: 파일 {len(pending)}개 (workers={PARSE_WORKERS})")
-        files, chunks, errs = index_files(manifest, client, model, pending)
-        manifest.save()
-        return {
-            "files_processed": files, "chunks_added": chunks, "errors": errs,
-            "deleted_files": len(deleted), "removed_chunks": removed,
-            "elapsed_sec": time.time() - t0,
-        }
+        log(f"  처리 대상: 파일 {len(pending)}개 (workers={PARSE_WORKERS}, batch={BATCH_SIZE})")
+        # 큰 pending 리스트는 BATCH_SIZE 단위로 잘라서 처리 — 매 배치마다 ProcessPool을
+        # 새로 띄우므로 워커 메모리(모델/캐시)가 해제된다. 16GB 시스템에서 OOM 방지.
+        for i in range(0, len(pending), BATCH_SIZE):
+            batch = pending[i:i + BATCH_SIZE]
+            log(f"  ── batch {i//BATCH_SIZE + 1}/{(len(pending)+BATCH_SIZE-1)//BATCH_SIZE} ({len(batch)} files) ──")
+            f, c, e = index_files(manifest, client, model, batch)
+            total_files += f; total_chunks += c; total_errs += e
+            manifest.save()
+            # 약간 쉬어 OS가 메모리 회수 시간 확보
+            time.sleep(1)
     return {
-        "files_processed": 0, "chunks_added": 0, "errors": 0,
+        "files_processed": total_files, "chunks_added": total_chunks, "errors": total_errs,
         "deleted_files": len(deleted), "removed_chunks": removed,
         "elapsed_sec": time.time() - t0,
     }
@@ -378,14 +422,14 @@ def main(argv: list[str]) -> int:
         log(f"[오류] SOURCE_ROOT 없음: {SOURCE_ROOT}")
         return 1
 
-    log("임베딩 모델 로딩...")
-    model = SentenceTransformer(EMBEDDING_MODEL)
-    log("ChromaDB 클라이언트 초기화...")
-    CHROMA_DIR.mkdir(parents=True, exist_ok=True)
-    client = chromadb.PersistentClient(
-        path=str(CHROMA_DIR),
-        settings=Settings(anonymized_telemetry=False),
-    )
+    # 메인 프로세스는 임베딩하지 않음 — 워커가 각자 모델을 로드한다.
+    # 호환을 위해 None을 model 자리에 넘긴다 (index_files는 사용하지 않음).
+    model = None
+    log(f"ChromaDB 클라이언트 초기화... mode={CHROMA_MODE} target={describe_target()}")
+    # persistent 모드일 때만 디렉터리 생성. http 모드는 chroma run 서버가 관리.
+    if CHROMA_MODE == "persistent":
+        CHROMA_DIR.mkdir(parents=True, exist_ok=True)
+    client = get_chroma_client()
     manifest = Manifest()
     log(f"manifest entries 로드: {len(manifest.entries)}개")
 

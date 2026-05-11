@@ -111,11 +111,19 @@ function formatCount(n) {
   return Number(n || 0).toLocaleString("ko-KR");
 }
 
+// fetch with timeout — 죽은 URL/네트워크 문제로 무한 대기하지 않도록 모든 헬스/터널 fetch에 적용
+function fetchWithTimeout(url, opts = {}, timeoutMs = 8000) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  return fetch(url, { ...opts, signal: ctrl.signal }).finally(() => clearTimeout(timer));
+}
+
 async function fetchAutoUrl() {
   try {
-    const r = await fetch(`tunnel.json?t=${Date.now()}`, { cache: "no-store" });
+    const r = await fetchWithTimeout(`tunnel.json?t=${Date.now()}`, { cache: "no-store" }, 5000);
     if (!r.ok) return "";
-    const data = await r.json();
+    const text = (await r.text()).replace(/^﻿/, ""); // BOM 방어
+    const data = JSON.parse(text);
     return (data.url || "").trim().replace(/\/+$/, "");
   } catch {
     return "";
@@ -129,25 +137,29 @@ function normalizeUrl(u) {
 async function loadSettings() {
   const cfg = window.APP_CONFIG || {};
 
+  setStatus("연결 확인 중…", "info"); // tunnel.json fetch가 길어져도 사용자에게 "막힘"으로 보이지 않게.
+
   const params = new URLSearchParams(location.search);
   const urlFromQuery = params.get("api");
-  if (urlFromQuery) {
-    localStorage.setItem(LS_KEYS.url, urlFromQuery);
-    history.replaceState(null, "", location.pathname);
-  }
   // ?reset=1 로 stale localStorage 청소
   if (params.get("reset")) {
     localStorage.removeItem(LS_KEYS.url);
     history.replaceState(null, "", location.pathname);
   }
+  if (urlFromQuery) {
+    // 옛날엔 localStorage에 박았는데 그게 죽은 URL을 stale 상태로 누적시킴.
+    // 이제는 sessionStorage(브라우저 탭 단위 임시)에만 두고, 다음 새로고침이면 tunnel.json 자동 갱신본을 우선 사용.
+    sessionStorage.setItem(LS_KEYS.url, urlFromQuery);
+    history.replaceState(null, "", location.pathname);
+  }
 
+  const queryUrl = normalizeUrl(sessionStorage.getItem(LS_KEYS.url));
   const storedUrl = normalizeUrl(localStorage.getItem(LS_KEYS.url));
   const autoUrl = await fetchAutoUrl();
 
-  // tunnel.json이 발급된 fresh URL을 가지고 있으면 항상 그걸 우선.
-  // localStorage 우선이면 옛 죽은 URL이 새 URL을 덮는 stale 문제가 생김.
-  // 사용자가 ?api=...로 명시 지정한 경우는 위에서 storedUrl로 덮어 씌워졌으니 보존됨.
-  els.apiUrl.value = autoUrl || storedUrl || cfg.defaultApiUrl || "";
+  // 우선순위: tunnel.json fresh URL > ?api= (sessionStorage) > 사용자 수동 설정 localStorage > config 기본값.
+  // tunnel.json이 살아있으면 항상 그걸 신뢰. (watchdog가 매번 새 URL 발급 후 push하므로)
+  els.apiUrl.value = autoUrl || queryUrl || storedUrl || cfg.defaultApiUrl || "";
   els.apiToken.value = localStorage.getItem(LS_KEYS.token) || "";
   els.topK.value = localStorage.getItem(LS_KEYS.topK) || cfg.defaultTopK || 5;
 }
@@ -175,13 +187,38 @@ function authHeaders() {
 }
 
 async function tryHealthOnce(base) {
-  const r = await fetch(`${base}/health`, { headers: authHeaders() });
+  // quick=1 → 서버는 캐시 있으면 캐시, 없으면 warming=true 즉답하면서 백그라운드 prewarm.
+  // 8s timeout: 죽은 URL에 묶여 화면이 "확인 중..." 상태로 30s+ 멈추지 않게.
+  const r = await fetchWithTimeout(`${base}/health?quick=1`, { headers: authHeaders() }, 8000);
   const data = await r.json();
+  // warming 응답이면 잠시 후 한번 더 (캐시 채워졌을 가능성). 실패해도 warming 결과 그대로 반환.
+  if (data && data.warming) {
+    await new Promise((r) => setTimeout(r, 2500));
+    try {
+      const r2 = await fetchWithTimeout(`${base}/health?quick=1`, { headers: authHeaders() }, 8000);
+      const d2 = await r2.json();
+      if (d2 && !d2.warming) return d2;
+    } catch {}
+  }
   return data;
 }
 
+let _warmingRetries = 0;
+const _WARMING_MAX_RETRIES = 20; // 4s × 20 = 80s. /health cold start의 최악(8 컬렉션 × 10s) 커버.
+
 function applyHealth(data) {
-  if (data.ok && data.collection_count > 0) {
+  if (data.ok && data.warming) {
+    // 백엔드 cold start — 캐시 채워지는 중. 코퍼스는 안 그리고, 잠시 후 자동 재시도.
+    setStatus("연결 OK · 인덱스 로딩 중…", "info");
+    els.corpus.hidden = true;
+    if (_warmingRetries < _WARMING_MAX_RETRIES) {
+      _warmingRetries++;
+      setTimeout(() => { checkHealth().catch(() => {}); }, 4000);
+    } else {
+      setStatus("연결 OK · 인덱스 로딩이 지연되고 있습니다. 잠시 후 새로고침해 주세요.", "warn");
+    }
+  } else if (data.ok && data.collection_count > 0) {
+    _warmingRetries = 0;
     setStatus(`연결 OK · 청크 ${formatCount(data.collection_count)}개 로드됨`, "ok");
     renderCorpus(data.collections || {}, data.collection_count);
   } else if (data.ok) {

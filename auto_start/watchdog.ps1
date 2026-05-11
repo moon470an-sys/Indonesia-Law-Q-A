@@ -41,8 +41,10 @@ if (-not (Test-Path $Cloudflared)) { Write-WLog "FATAL: cloudflared.exe missing"
 if (-not (Test-Path (Join-Path $Project ".env"))) { Write-WLog "FATAL: .env missing"; exit 1 }
 
 function Test-UvicornHealth {
+    # /healthz는 ChromaDB 접근 없이 즉시 응답하는 liveness 엔드포인트.
+    # 30s 타임아웃으로 일시적 GC/IO 지연도 흡수.
     try {
-        $r = Invoke-WebRequest -Uri "http://127.0.0.1:8000/health" -UseBasicParsing -TimeoutSec 5
+        $r = Invoke-WebRequest -Uri "http://127.0.0.1:8000/healthz" -UseBasicParsing -TimeoutSec 30
         return ($r.StatusCode -eq 200)
     } catch { return $false }
 }
@@ -51,7 +53,7 @@ function Test-TunnelHealth {
     param([string]$Url)
     if (-not $Url) { return $false }
     try {
-        $r = Invoke-WebRequest -Uri "$Url/health" -UseBasicParsing -TimeoutSec 15
+        $r = Invoke-WebRequest -Uri "$Url/healthz" -UseBasicParsing -TimeoutSec 30
         return ($r.StatusCode -eq 200)
     } catch { return $false }
 }
@@ -73,6 +75,17 @@ function Stop-AllCloudflared {
         }
 }
 
+function Invoke-HealthPrewarm {
+    # 새 uvicorn 기동 직후 /health 캐시를 채워둠 → 사용자 첫 요청이 cold start 80s를 떠안지 않음.
+    try {
+        Invoke-WebRequest -Uri "http://127.0.0.1:8000/health/prewarm" `
+            -Method POST -UseBasicParsing -TimeoutSec 10 | Out-Null
+        Write-WLog "  /health prewarm triggered"
+    } catch {
+        Write-WLog "  /health prewarm call failed: $_"
+    }
+}
+
 function Start-Uvicorn {
     Write-WLog "starting uvicorn..."
     Stop-AllUvicorn
@@ -87,6 +100,7 @@ function Start-Uvicorn {
     for ($i = 0; $i -lt 150; $i++) {
         if (Test-UvicornHealth) {
             Write-WLog "  uvicorn healthy after $($i*4)s"
+            Invoke-HealthPrewarm
             return $true
         }
         Start-Sleep -Seconds 4
@@ -175,8 +189,14 @@ Write-WLog "boot: known tunnel = $currentTunnel"
 
 while ($true) {
     try {
-        if (-not (Test-UvicornHealth)) {
-            Write-WLog "uvicorn DOWN, restarting"
+        $uvOk = Test-UvicornHealth
+        if (-not $uvOk) {
+            # 한 번 실패는 무시하고 잠깐 후 재확인. 연속 2회 실패해야 재시작.
+            Start-Sleep -Seconds 10
+            $uvOk = Test-UvicornHealth
+        }
+        if (-not $uvOk) {
+            Write-WLog "uvicorn DOWN (2 consecutive checks failed), restarting"
             if (-not (Start-Uvicorn)) {
                 Write-WLog "uvicorn restart failed; sleep 60s and retry"
                 Start-Sleep -Seconds 60
@@ -184,10 +204,22 @@ while ($true) {
             }
         }
 
+        # 터널 health: 5회 연속 실패해야 URL 재발급. 1~2회 깜빡임은 무시.
+        # 매 재발급마다 git push + Pages 빌드 + CDN propagation 비용이 크고, 그 사이 사용자는 stale URL에 묶임.
+        # $currentTunnel이 비어있으면 (부팅 첫 사이클) 즉시 시작.
         $cfOk = $false
-        if ($currentTunnel) { $cfOk = Test-TunnelHealth -Url $currentTunnel }
+        if ($currentTunnel) {
+            for ($probe = 1; $probe -le 5; $probe++) {
+                if (Test-TunnelHealth -Url $currentTunnel) { $cfOk = $true; break }
+                if ($probe -lt 5) { Start-Sleep -Seconds 12 }
+            }
+        }
         if (-not $cfOk) {
-            Write-WLog "tunnel DOWN (current=$currentTunnel), restarting cloudflared"
+            if ($currentTunnel) {
+                Write-WLog "tunnel DOWN (current=$currentTunnel, 5 consecutive probes failed), restarting cloudflared"
+            } else {
+                Write-WLog "tunnel not set, starting cloudflared"
+            }
             $newUrl = Start-Cloudflared
             if ($newUrl) {
                 $currentTunnel = $newUrl

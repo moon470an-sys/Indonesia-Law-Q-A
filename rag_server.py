@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import os
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -75,7 +77,13 @@ _state: dict[str, Any] = {
     "model": None,
     "client": None,
     "anthropic": None,
+    "health_cache": None,        # 마지막 /health 결과
+    "health_cache_ts": 0.0,       # 마지막 갱신 시각 (epoch)
+    "health_warming": False,      # 백그라운드 prewarm 진행 중 플래그
 }
+_health_lock = threading.Lock()
+
+HEALTH_CACHE_TTL = 300.0  # /health 캐시 TTL (5분). count()가 80s+ 걸리는 cold start 비용을 사용자에게 노출시키지 않음.
 
 
 def get_model() -> SentenceTransformer:
@@ -218,8 +226,13 @@ def search_all_collections(
     return [all_docs[i] for i in order], [all_metas[i] for i in order], [all_dists[i] for i in order]
 
 
-@app.get("/health")
-def health() -> dict[str, Any]:
+@app.get("/healthz")
+def healthz() -> dict[str, Any]:
+    # 가벼운 liveness 체크. ChromaDB 접근 안 함 → watchdog/cloudflared가 빠르게 살아있음 확인.
+    return {"ok": True}
+
+
+def _compute_full_health() -> dict[str, Any]:
     info: dict[str, Any] = {
         "ok": True,
         "chroma_dir_exists": CHROMA_DIR.exists(),
@@ -234,6 +247,62 @@ def health() -> dict[str, Any]:
         info["ok"] = False
         info["error"] = str(exc)
     return info
+
+
+def _refresh_health_cache() -> None:
+    """count()를 백그라운드 스레드에서 호출해 캐시 채움. /health?quick=1 즉답 직후 발사."""
+    with _health_lock:
+        if _state.get("health_warming"):
+            return
+        _state["health_warming"] = True
+    try:
+        info = _compute_full_health()
+        if info.get("ok"):
+            _state["health_cache"] = info
+            _state["health_cache_ts"] = time.time()
+    finally:
+        _state["health_warming"] = False
+
+
+@app.get("/health")
+def health(quick: int = 0) -> dict[str, Any]:
+    """기본 모드: 캐시 있으면 캐시, 없으면 동기 count() (cold 80s).
+
+    quick=1: 캐시 있으면 캐시 즉답, 없으면 `warming=true`로 즉답 + 백그라운드 prewarm 시작.
+    프론트는 quick=1 → warming 응답 받으면 잠시 후 일반 /health로 재호출.
+    """
+    cached = _state.get("health_cache")
+    cached_ts = _state.get("health_cache_ts", 0.0)
+    cache_fresh = cached is not None and (time.time() - cached_ts) < HEALTH_CACHE_TTL
+
+    if cache_fresh:
+        return cached
+
+    if quick:
+        # 캐시 없음/만료 → 백그라운드 prewarm 발사 후 즉답
+        if not _state.get("health_warming"):
+            threading.Thread(target=_refresh_health_cache, daemon=True).start()
+        return {
+            "ok": True,
+            "warming": True,
+            "chroma_dir_exists": CHROMA_DIR.exists(),
+            "anthropic_key_set": bool(ANTHROPIC_API_KEY),
+        }
+
+    # 동기 모드 (캐시 채움까지 대기)
+    info = _compute_full_health()
+    if info.get("ok"):
+        _state["health_cache"] = info
+        _state["health_cache_ts"] = time.time()
+    return info
+
+
+@app.post("/health/prewarm")
+def health_prewarm() -> dict[str, Any]:
+    """watchdog가 uvicorn 기동 직후 호출. 백그라운드 prewarm 트리거. 즉답."""
+    if _state.get("health_cache") is None and not _state.get("health_warming"):
+        threading.Thread(target=_refresh_health_cache, daemon=True).start()
+    return {"ok": True, "warming": _state.get("health_warming", False)}
 
 
 @app.post("/query", response_model=QueryResponse)

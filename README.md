@@ -364,3 +364,46 @@ Invoke-WebRequest -Uri "http://127.0.0.1:8000/health/live" -TimeoutSec 5
 ### 롤백
 
 `/health/live`, `/health/ready`는 추가만 됐고 기존 `/healthz`는 그대로이므로 Stage 2 단독 롤백은 워밍업이 부담될 때만 필요. 그 경우 `_on_startup`을 빼고 `_state["ready"] = True`로 초기화하면 readiness가 항상 200.
+
+---
+
+## 12. 설정 핫리로드 (Stage 3 변경)
+
+토큰 검증 같은 정책은 `.env`만 고치고 admin 엔드포인트 한 번 치면 적용됩니다. 더 이상 "토큰 한 줄 바꾸려고 10GB 다시 로딩"하지 않습니다.
+
+### 핫리로드 대상
+
+| 환경변수 | 의미 | 핫리로드 |
+|---|---|---|
+| `CLIENT_API_TOKEN` | 단일 토큰 (호환 유지) | ✅ |
+| `RAG_TOKENS` | 콤마 분리 다중 토큰 | ✅ |
+| `RAG_REQUIRE_TOKEN` | 검증 on/off 명시 토글 | ✅ |
+| `RAG_ADMIN_KEY` | admin 엔드포인트 보호 키 | ❌ (재시작 필요) |
+| `ANTHROPIC_API_KEY`, `RAG_CHROMA_*`, `ALLOWED_ORIGINS`, 모델 경로 | 인프라성 | ❌ (재시작 필요) |
+
+### 사용법
+
+`.env`에서 정책값 수정 후:
+```powershell
+curl -Method POST -Headers @{"X-Admin-Key"="${env:RAG_ADMIN_KEY}"} `
+  http://127.0.0.1:8000/admin/reload-config
+```
+응답:
+```json
+{
+  "reloaded": ["require_token", "tokens"],
+  "current": { "require_token": true, "token_count": 2 }
+}
+```
+
+요청마다 `require_token`이 `_config` dict를 lookup하므로 다음 요청부터 즉시 새 정책 적용.
+
+### 보안 모델
+
+- `RAG_ADMIN_KEY`가 비어 있으면 admin 엔드포인트는 항상 503. 실수로 무방비 노출되지 않게.
+- `RAG_ADMIN_KEY`는 충분히 긴 무작위 문자열 권장 (`CLIENT_API_TOKEN`과 동일 PowerShell 명령).
+- admin 호출은 가능하면 localhost에서만 (cloudflared 터널 통해서 노출하지 말 것).
+
+### 동시성
+
+`_config` 갱신과 require_token 검증은 모두 `threading.Lock`으로 보호. dict snapshot을 잡은 뒤 비교만 하므로 lock 보유 시간은 마이크로초 단위.

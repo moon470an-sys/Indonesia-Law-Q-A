@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -49,7 +50,6 @@ CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
 TOP_K_DEFAULT = 5
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
-CLIENT_API_TOKEN = os.getenv("CLIENT_API_TOKEN", "")
 ALLOWED_ORIGINS = [
     o.strip()
     for o in os.getenv(
@@ -58,6 +58,79 @@ ALLOWED_ORIGINS = [
     ).split(",")
     if o.strip()
 ]
+
+# ===== 핫리로드 가능 정책 설정 =====
+# 토큰 검증/세팅값처럼 자주 바꾸는 항목은 모듈 전역 상수로 굳히지 않고 dict로 둬서
+# .env 수정 후 POST /admin/reload-config로 재시작 없이 적용한다.
+# 모델 경로/ChromaDB 연결 같은 인프라성은 여전히 모듈 import 시점에 고정.
+_config: dict[str, Any] = {}
+_config_lock = threading.Lock()
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _read_policy_env() -> dict[str, Any]:
+    """현재 process env(이미 .env 로드된 상태)에서 핫리로드 대상 정책값을 읽어 dict."""
+    # 토큰: 콤마 분리 다중 지원(RAG_TOKENS), 기존 단일 CLIENT_API_TOKEN도 인정.
+    tokens_raw = os.getenv("RAG_TOKENS") or os.getenv("CLIENT_API_TOKEN") or ""
+    tokens = {t.strip() for t in tokens_raw.split(",") if t.strip()}
+
+    # 기본값: 토큰이 하나라도 있으면 검증 ON, 아니면 OFF.
+    # 명시적으로 RAG_REQUIRE_TOKEN을 설정하면 그 값을 우선.
+    require = _env_bool("RAG_REQUIRE_TOKEN", default=bool(tokens))
+
+    return {
+        "require_token": require,
+        "tokens": frozenset(tokens),
+    }
+
+
+def reload_config() -> dict[str, Any]:
+    """스레드 안전하게 _config를 .env로부터 재로드. 변경된 키 목록 반환.
+
+    .env 파일을 다시 읽고(override=True) 그 결과를 process env에 반영한 뒤
+    _read_policy_env로 정책값만 dict에 갱신한다.
+    """
+    # override=True: 이미 process env에 있는 값도 .env로 덮어쓰기. 토큰 비우기 등을
+    # 적용하려면 필수. 단점: shell에서 export한 값도 덮어쓰지만, 운영 환경에선 .env가 단일 진실.
+    load_dotenv(PROJECT_DIR / ".env", override=True)
+    new_cfg = _read_policy_env()
+
+    with _config_lock:
+        changed: list[str] = []
+        for k, v in new_cfg.items():
+            if _config.get(k) != v:
+                changed.append(k)
+            _config[k] = v
+        # 사라진 키 정리
+        for k in list(_config.keys()):
+            if k not in new_cfg:
+                _config.pop(k, None)
+                changed.append(f"-{k}")
+
+    return {
+        "reloaded": changed,
+        "current": {
+            "require_token": _config["require_token"],
+            "token_count": len(_config["tokens"]),
+        },
+    }
+
+
+# 부팅 시점에 1회 로드 (process env에 .env 반영 후 정책 dict 채움).
+reload_config()
+
+# 운영 호환을 위한 별칭. 코드를 import해서 쓰는 곳이 있으면 깨지지 않게.
+CLIENT_API_TOKEN = ",".join(sorted(_config["tokens"])) if _config["tokens"] else ""
+
+# ===== Admin endpoint 보호 키 (인프라성, 핫리로드 대상 아님) =====
+ADMIN_KEY = os.getenv("RAG_ADMIN_KEY", "")
+
 
 app = FastAPI(title="Indonesia Constitution RAG", version="1.0.0")
 app.add_middleware(
@@ -70,14 +143,22 @@ app.add_middleware(
 
 
 def require_token(x_api_token: str | None = Header(default=None)) -> None:
-    """프론트엔드(GitHub Pages)에서 보낸 토큰 검증.
-
-    CLIENT_API_TOKEN을 비워두면 검증을 건너뜁니다(로컬 개발 시).
-    """
-    if not CLIENT_API_TOKEN:
+    """프론트엔드에서 보낸 토큰 검증. _config dict을 매 요청마다 참조해 핫리로드 반영."""
+    with _config_lock:
+        require = bool(_config.get("require_token"))
+        tokens: frozenset[str] = _config.get("tokens", frozenset())
+    if not require:
         return
-    if x_api_token != CLIENT_API_TOKEN:
+    if not tokens or x_api_token not in tokens:
         raise HTTPException(status_code=401, detail="invalid token")
+
+
+def _require_admin(x_admin_key: str | None) -> None:
+    if not ADMIN_KEY:
+        # 키가 비어 있으면 admin endpoint 비활성화. 실수로 무방비 노출되는 일 차단.
+        raise HTTPException(status_code=503, detail="admin endpoint disabled (RAG_ADMIN_KEY not set)")
+    if x_admin_key != ADMIN_KEY:
+        raise HTTPException(status_code=401, detail="invalid admin key")
 
 _state: dict[str, Any] = {
     "model": None,
@@ -316,6 +397,20 @@ def health_ready():
 def healthz() -> dict[str, Any]:
     """호환 alias for /health/live. 기존 watchdog/cloudflared 설정과의 호환을 위해 유지."""
     return health_live()
+
+
+@app.post("/admin/reload-config")
+def admin_reload_config(x_admin_key: str | None = Header(default=None)) -> dict[str, Any]:
+    """정책성 설정을 .env로부터 재시작 없이 다시 읽는다.
+
+    핫리로드 대상: RAG_REQUIRE_TOKEN, RAG_TOKENS (또는 CLIENT_API_TOKEN).
+    인프라성(ChromaDB 연결, 모델 경로, ALLOWED_ORIGINS 등)은 대상 아님 — 재시작 필요.
+
+    인증: X-Admin-Key 헤더가 RAG_ADMIN_KEY와 일치해야 함. RAG_ADMIN_KEY 자체가
+    비어있으면 503을 반환해서 admin endpoint를 비활성화.
+    """
+    _require_admin(x_admin_key)
+    return reload_config()
 
 
 @app.get("/health")

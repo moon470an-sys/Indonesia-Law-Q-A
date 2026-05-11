@@ -62,37 +62,10 @@
       <p class="hint">카드를 클릭하면 해당 법령 종류로 검색 범위가 한정됩니다 (다중 선택 가능, 다시 클릭하면 해제).</p>
     </section>
 
-    <section class="settings">
-      <details>
-        <summary>⚙️ 백엔드 연결 설정</summary>
-        <div class="settings-body">
-          <label>
-            백엔드 URL (Cloudflare Tunnel 주소)
-            <input type="text" id="apiUrl" placeholder="https://your-tunnel.trycloudflare.com" />
-          </label>
-          <label>
-            클라이언트 토큰 (서버의 CLIENT_API_TOKEN과 동일)
-            <input type="password" id="apiToken" placeholder="비워두면 인증 없음" />
-          </label>
-          <label>
-            Top-K (검색할 문서 청크 수)
-            <input type="number" id="topK" min="1" max="15" value="5" />
-          </label>
-          <div class="row">
-            <button id="saveBtn" class="secondary">설정 저장</button>
-            <button id="healthBtn" class="secondary">연결 테스트</button>
-          </div>
-          <p class="hint">
-            * 토큰과 URL은 브라우저 localStorage에만 저장됩니다 (서버/저장소 전송 없음).
-          </p>
-        </div>
-      </details>
-    </section>
-
-    <section class="examples" id="examples">
-      <span class="label">예시 질문</span>
-      <div class="example-chips" id="exampleChips"></div>
-    </section>
+    <!-- 백엔드 연결값은 hidden input으로만 유지 (UI 없음). tunnel.json이 apiUrl을 자동 주입. -->
+    <input type="hidden" id="apiUrl" />
+    <input type="hidden" id="apiToken" />
+    <input type="hidden" id="topK" value="5" />
 
     <section class="ask" id="ask">
       <textarea id="question" rows="3" placeholder="인도네시아 법령에 관해 질문하세요…"></textarea>

@@ -1275,8 +1275,8 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
-els.saveBtn.addEventListener("click", saveSettings);
-els.healthBtn.addEventListener("click", checkHealth);
+els.saveBtn?.addEventListener("click", saveSettings);
+els.healthBtn?.addEventListener("click", checkHealth);
 els.askBtn.addEventListener("click", askQuestion);
 els.clearBtn.addEventListener("click", () => {
   if (!historyItems.length) return;

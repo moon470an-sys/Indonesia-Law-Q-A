@@ -330,3 +330,37 @@ RAG_CHROMA_MODE=persistent
 ### 알려진 호환 이슈
 
 - ChromaDB 클라이언트 버전과 서버(`chroma run`) 버전이 다르면 컬렉션 포맷 mismatch 가능. `rag_server` 시작 로그에 `client_ver=… server_ver=…`이 찍히고 다르면 경고. 같은 `.venv`의 `chroma.exe`로 서버를 띄우면 항상 일치.
+
+---
+
+## 11. Health endpoint 분리 (Stage 2 변경)
+
+`rag_server.py`는 두 종류의 health 엔드포인트를 노출합니다.
+
+| Endpoint | 의미 | 사용처 | 응답 |
+|---|---|---|---|
+| `/health/live` (`/healthz` alias) | 프로세스 살아있음. 의존성 체크 없음. 즉시 200. | watchdog, cloudflared keep-alive | `{"ok":true,"alive":true}` |
+| `/health/ready` | SentenceTransformer + ChromaDB 워밍업 완료 여부. | 프록시/프론트엔드의 라우팅 결정 | 준비 완료: 200 / 준비 중: 503 (body에 `error`, `warmup_started_ts`) |
+| `/health` | 컬렉션별 청크 수 등 사람용 데이터 응답 (캐시 24h). | 프론트엔드 UI | `{"ok":true,"collection_count":...}` |
+
+### 워밍업 동작
+
+- uvicorn 부팅 직후 FastAPI `startup` 이벤트가 `asyncio.to_thread`로 워밍업을 시작.
+- 워밍업 = SentenceTransformer 1회 encode + 모든 `indonesia_*` 컬렉션에 peek.
+- 완료까지 평균 30~120초. 그 동안 `/health/live`는 200, `/health/ready`는 503.
+
+### watchdog 설정 가이드
+
+`auto_start/watchdog.ps1`의 `Test-UvicornHealth`는 **반드시 `/health/live`만** polling 해야 합니다. `/health/ready`를 polling하면 워밍업 중에 watchdog가 서버를 죽이고 재시작하는 cycle이 다시 생깁니다.
+
+`Test-UvicornHealth` 내부:
+```powershell
+Invoke-WebRequest -Uri "http://127.0.0.1:8000/health/live" -TimeoutSec 5
+```
+(또는 호환을 위해 `/healthz` 유지 가능 — 둘은 같은 핸들러.)
+
+응급 처치로 늘려둔 "5회 연속 실패해야 재시작" 임계값은 이제 **2회로 원복 가능**합니다. /health/live는 ChromaDB 접근 없이 즉답하므로 정상이라면 빠르게 응답합니다.
+
+### 롤백
+
+`/health/live`, `/health/ready`는 추가만 됐고 기존 `/healthz`는 그대로이므로 Stage 2 단독 롤백은 워밍업이 부담될 때만 필요. 그 경우 `_on_startup`을 빼고 `_state["ready"] = True`로 초기화하면 readiness가 항상 200.

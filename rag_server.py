@@ -6,10 +6,13 @@
 """
 from __future__ import annotations
 
+import logging
 import os
 import time
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # C: 디스크가 거의 가득 차 있어 무거운 캐시는 D:에 저장 (환경변수로 override 가능)
 _DEFAULT_CACHE = Path(os.getenv("RAG_MODEL_CACHE", r"D:\hf_cache"))
@@ -82,6 +85,11 @@ _state: dict[str, Any] = {
     "anthropic": None,
     "health_cache": None,        # 마지막 /health 결과
     "health_cache_ts": 0.0,       # 마지막 갱신 시각 (epoch)
+    "ready": False,               # 워밍업 완료 여부 → /health/ready 200/503 분기
+    "readiness_error": None,      # 워밍업 실패 시 사람이 읽을 수 있는 원인 한 줄
+    "warmup_started": False,      # 중복 워밍업 가드
+    "warmup_started_ts": 0.0,
+    "warmup_finished_ts": 0.0,
 }
 
 HEALTH_CACHE_TTL = 86400.0  # 24h. 청크 수는 ingest가 돌 때만 변하고, ingest는 uvicorn 재시작을 동반 → 캐시도 자연히 초기화.
@@ -226,10 +234,88 @@ def search_all_collections(
     return [all_docs[i] for i in order], [all_metas[i] for i in order], [all_dists[i] for i in order]
 
 
+def _warmup_sync() -> None:
+    """SentenceTransformer + ChromaDB를 백그라운드 스레드에서 미리 로드.
+
+    완료 시 _state["ready"] = True. 실패 시 readiness_error에 원인을 적고 False 유지.
+    watchdog는 /health/live만 polling하면 되므로 워밍업 중에도 죽이지 않음.
+    """
+    _state["warmup_started"] = True
+    _state["warmup_started_ts"] = time.time()
+    started = time.perf_counter()
+    try:
+        logger.info("warmup: SentenceTransformer 로딩 시작 (%s)", EMBEDDING_MODEL)
+        m = get_model()
+        m.encode(["warmup"], convert_to_numpy=True, normalize_embeddings=True)
+        logger.info("warmup: SentenceTransformer OK (%.1fs)", time.perf_counter() - started)
+
+        t1 = time.perf_counter()
+        logger.info("warmup: ChromaDB 연결 검증 (target=%s)", describe_target())
+        cols = list_indonesia_collections()
+        for c in cols:
+            # peek은 count()보다 가볍게 컬렉션 접근만 확인 — readiness 용도엔 충분.
+            try:
+                c.peek(limit=1)
+            except Exception:
+                # peek 미지원/실패해도 컬렉션 리스트 자체는 받았으니 ready 인정.
+                pass
+        logger.info(
+            "warmup: ChromaDB OK, %d collections (%.1fs)",
+            len(cols), time.perf_counter() - t1,
+        )
+
+        _state["ready"] = True
+        _state["readiness_error"] = None
+        _state["warmup_finished_ts"] = time.time()
+        logger.info("warmup: 완료, 총 %.1fs", time.perf_counter() - started)
+    except Exception as exc:
+        _state["ready"] = False
+        _state["readiness_error"] = f"{type(exc).__name__}: {exc}"
+        _state["warmup_finished_ts"] = time.time()
+        logger.exception("warmup 실패")
+
+
+@app.on_event("startup")
+async def _on_startup() -> None:
+    """uvicorn 부팅 직후 워밍업을 백그라운드 스레드로 발사.
+
+    asyncio.to_thread로 위임해서 이벤트루프를 막지 않음. /healthz / /health/live는
+    워밍업 진행과 무관하게 즉시 200을 반환. /health/ready만 워밍업 끝나면 200, 그 전엔 503.
+    """
+    import asyncio
+    if _state.get("warmup_started"):
+        return
+    asyncio.create_task(asyncio.to_thread(_warmup_sync))
+
+
+@app.get("/health/live")
+def health_live() -> dict[str, Any]:
+    """Liveness — 프로세스 살아있음. 의존성 체크 없음. watchdog 용도."""
+    return {"ok": True, "alive": True}
+
+
+@app.get("/health/ready")
+def health_ready():
+    """Readiness — 모든 의존성(SentenceTransformer + ChromaDB) 로딩 완료 여부.
+
+    프록시/프론트엔드가 사용자 요청 라우팅 가능한지 판단할 때 사용.
+    """
+    from fastapi.responses import JSONResponse
+    ready = bool(_state.get("ready"))
+    body = {
+        "ready": ready,
+        "error": _state.get("readiness_error"),
+        "warmup_started_ts": _state.get("warmup_started_ts") or None,
+        "warmup_finished_ts": _state.get("warmup_finished_ts") or None,
+        "chroma_target": describe_target(),
+    }
+    return JSONResponse(body, status_code=200 if ready else 503)
+
+
 @app.get("/healthz")
 def healthz() -> dict[str, Any]:
-    # 가벼운 liveness 체크. ChromaDB 접근 안 함 → watchdog/cloudflared가 빠르게 살아있음 확인.
-    return {"ok": True}
+    """호환 alias for /health/live. 기존 watchdog/cloudflared 설정과의 호환을 위해 유지."""
+    return health_live()
 
 
 @app.get("/health")

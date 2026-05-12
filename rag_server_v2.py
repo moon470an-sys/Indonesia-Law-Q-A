@@ -777,6 +777,156 @@ def critique_answer(question: str, context: str, answer: str) -> dict:
         return {**default, "summary": f"검증 호출 실패: {type(exc).__name__}"}
 
 
+# ===== Phase 5b: critique-driven retry + deterministic citation verifier =====
+# critique(LLM)이 hallucination/bad_citation/low confidence를 보고하거나,
+# verify_citations(정규식 + chunk metadata 매칭)가 unverified 인용을 찾으면
+# 한 번 더 답변 생성한다. 두 번째 답변에는 issue 목록을 명시 제공 → 모델이 문제 부분만 교정.
+
+RETRY_MAX = int(os.getenv("RAG_CRITIQUE_RETRY_MAX", "1"))
+RETRY_ON_MEDIUM_MIN_ISSUES = int(os.getenv("RAG_CRITIQUE_RETRY_ON_MEDIUM_MIN_ISSUES", "2"))
+
+# (Pasal 7 ayat (1), 출처: 파일명.pdf, p.5) 패턴. ayat 부분은 옵션, 페이지는 숫자.
+# 한국어/영문 컴마, 콜론 변형 허용.
+CITATION_RE = re.compile(
+    r"\(\s*"
+    r"(Pasal\s+[A-Za-z0-9]+(?:\s+ayat\s*\([^)]+\))?)"   # group 1: Pasal X 또는 Pasal X ayat (Y)
+    r"\s*[,，]\s*출처\s*[:：]\s*"
+    r"([^,，)]+?\.pdf)"                                   # group 2: filename.pdf
+    r"\s*[,，]\s*p\.?\s*(\d+)"                            # group 3: page
+    r"\s*\)",
+    re.IGNORECASE,
+)
+
+
+def verify_citations(answer: str, retrieved: list[dict]) -> dict:
+    """답변 내 inline 인용을 retrieved chunks의 metadata와 deterministic 매칭.
+
+    retrieved: rerank/agent loop가 답변 모델에 넘긴 context chunks. 각 항목은
+        rag_server_v2 내부 구조로 {"metadata": {"source","page","article",...}, "text":...}.
+    """
+    by_src: dict[str, list[dict]] = {}
+    for c in retrieved:
+        m = c.get("metadata") if isinstance(c, dict) else None
+        if not m:
+            continue
+        src = str(m.get("source", "")).strip().lower()
+        if src:
+            by_src.setdefault(src, []).append(m)
+
+    items: list[dict] = []
+    verified = 0
+    for match in CITATION_RE.finditer(answer):
+        pasal_raw = match.group(1).strip()
+        # chunk metadata.article은 "Pasal 7" 형식 (ayat 정보 없음) — ayat 부분 떼고 매칭.
+        pasal_key = re.split(r"\s+ayat", pasal_raw, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+        src_raw = match.group(2).strip()
+        try:
+            page_int = int(match.group(3))
+        except ValueError:
+            page_int = -1
+        src_low = src_raw.lower()
+        candidates = by_src.get(src_low)
+        if not candidates:
+            # fuzzy: substring 매칭 (확장자 변형/공백 등 흡수)
+            for k, v in by_src.items():
+                if src_low in k or k in src_low:
+                    candidates = v
+                    break
+        if not candidates:
+            items.append({
+                "raw": match.group(0), "pasal": pasal_raw, "source": src_raw, "page": page_int,
+                "status": "unverified", "reason": "source_not_in_context",
+            })
+            continue
+        art_ok = any(
+            str(m.get("article", "")).strip() == pasal_key
+            or str(m.get("article", "")).strip().startswith(pasal_key)
+            for m in candidates
+        )
+        page_ok = any(int(m.get("page", -2) or -2) == page_int for m in candidates)
+        if art_ok and page_ok:
+            verified += 1
+            items.append({
+                "raw": match.group(0), "pasal": pasal_raw, "source": src_raw, "page": page_int,
+                "status": "verified", "reason": "ok",
+            })
+        elif art_ok:
+            items.append({
+                "raw": match.group(0), "pasal": pasal_raw, "source": src_raw, "page": page_int,
+                "status": "page_mismatch", "reason": f"article OK, page {page_int} not in retrieved chunks",
+            })
+        else:
+            items.append({
+                "raw": match.group(0), "pasal": pasal_raw, "source": src_raw, "page": page_int,
+                "status": "article_mismatch", "reason": f"article '{pasal_key}' not in retrieved chunks for {src_raw}",
+            })
+    return {
+        "total": len(items),
+        "verified": verified,
+        "unverified": len(items) - verified,
+        "items": items,
+    }
+
+
+def should_retry(critique: dict, verifier: dict | None = None) -> tuple[bool, str]:
+    """retry 필요 여부 + 사유. 사유는 debug 노출용."""
+    if RETRY_MAX <= 0:
+        return False, "disabled"
+    # 1) deterministic verifier — LLM call 없이 즉시 판정. 우선 신호.
+    if verifier and (verifier.get("unverified") or 0) > 0:
+        return True, f"verifier_unverified={verifier['unverified']}"
+    # 2) critique (LLM-based)
+    conf = (critique.get("confidence") or "unknown").lower()
+    issues = critique.get("issues") or []
+    if conf == "low":
+        return True, "confidence=low"
+    serious = [i for i in issues if (i.get("type") or "") in ("hallucination", "bad_citation")]
+    if serious:
+        return True, f"serious_issues={len(serious)}"
+    if conf == "medium" and len(issues) >= RETRY_ON_MEDIUM_MIN_ISSUES:
+        return True, f"medium+issues={len(issues)}"
+    return False, "ok"
+
+
+def build_retry_user_message(
+    question: str, context: str, prior_answer: str, critique: dict,
+    verifier: dict | None = None,
+) -> str:
+    """retry 시 모델에게 전달할 user message. 직전 답변과 발견된 문제를 명시."""
+    issues = list(critique.get("issues") or [])
+    # verifier 검증 실패 항목을 bad_citation issue로 추가 (LLM critique이 놓친 케이스 포함).
+    if verifier:
+        for it in (verifier.get("items") or []):
+            if (it.get("status") or "") == "verified":
+                continue
+            issues.insert(0, {
+                "type": "bad_citation",
+                "description": f"인용 '{it.get('raw','')}' 검증 실패 — {it.get('reason','')}",
+            })
+    issue_lines: list[str] = []
+    for i, it in enumerate(issues, start=1):
+        t = (it.get("type") or "?").strip()
+        desc = (it.get("description") or "").strip()
+        issue_lines.append(f"  {i}. [{t}] {desc}")
+    issues_txt = "\n".join(issue_lines) if issue_lines else "  - (구체 항목 없음 — 신뢰도 낮음으로 분류)"
+    summary = (critique.get("summary") or "").strip()
+    return (
+        f"[참고 문서]\n{context}\n\n"
+        f"[질문]\n{question}\n\n"
+        f"[직전 답변]\n{prior_answer}\n\n"
+        f"[검수 결과 — 직전 답변에서 발견된 문제]\n"
+        f"신뢰도: {critique.get('confidence', 'unknown')}\n"
+        f"요약: {summary}\n"
+        f"문제 목록:\n{issues_txt}\n\n"
+        f"위 [참고 문서]만을 근거로 다음을 지키며 답변을 **처음부터 다시** 작성하세요:\n"
+        f"- hallucination/bad_citation으로 지목된 인용은 제거하거나, fetch_article_chunks 도구로 raw 본문을 다시 확인한 뒤에만 인용.\n"
+        f"- missing으로 지목된 참고문서 내용은 명시적으로 답변에 포함.\n"
+        f"- 모든 조항 번호·페이지·인도네시아어 원문 인용은 [참고 문서]에 실제로 있는 텍스트와 정확히 일치해야 함.\n"
+        f"- 직전 답변의 목차/구조를 가능한 유지하되 누락 섹션은 빠짐없이 채울 것.\n"
+        f"- 인용 형식: (Pasal X ayat (Y), 출처: 파일명.pdf, p.NN)"
+    )
+
+
 RERANKER_PROMPT = """다음은 사용자의 질문과 검색된 청크들입니다. 각 청크가 질문에 답하는 데 얼마나 유용한지 평가하세요.
 
 [질문]
@@ -1175,10 +1325,44 @@ def query(req: QueryRequest, x_api_token: str | None = Header(default=None)) -> 
         "cache_read_input_tokens": getattr(usage, "cache_read_input_tokens", None),
     }
 
-    # Phase 5: self-critique
+    # Phase 5: self-critique + deterministic citation verifier
     t3 = time.time()
     critique = critique_answer(req.question, context, answer)
+    verifier = verify_citations(answer, top)
     t_critique = time.time() - t3
+
+    # Phase 5b: critique/verifier-driven retry.
+    retry_reason = "ok"
+    retry_count = 0
+    t_retry = 0.0
+    do_retry, retry_reason = should_retry(critique, verifier)
+    if do_retry:
+        retry_count = 1
+        retry_msg = build_retry_user_message(req.question, context, answer, critique, verifier)
+        t_retry_start = time.time()
+        try:
+            resp2 = client.messages.create(
+                model=CLAUDE_MODEL,
+                max_tokens=MAX_ANSWER_TOKENS,
+                thinking={"type": "enabled", "budget_tokens": THINKING_BUDGET_TOKENS},
+                system=SYSTEM_PROMPT_CACHED,
+                messages=[{"role": "user", "content": retry_msg}],
+            )
+            answer2 = "\n".join(
+                b.text for b in resp2.content if getattr(b, "type", None) == "text"
+            ).strip()
+            if answer2:
+                answer = answer2
+                u2 = resp2.usage
+                for k in ("input_tokens", "output_tokens",
+                          "cache_creation_input_tokens", "cache_read_input_tokens"):
+                    cache_stats[k] = (cache_stats.get(k) or 0) + (getattr(u2, k, None) or 0)
+                # 재검증
+                critique = critique_answer(req.question, context, answer)
+                verifier = verify_citations(answer, top)
+        except Exception as exc:
+            logger.warning("retry generation 실패: %s", exc)
+        t_retry = time.time() - t_retry_start
 
     sources = []
     for c in top:
@@ -1203,10 +1387,13 @@ def query(req: QueryRequest, x_api_token: str | None = Header(default=None)) -> 
                 "rerank_sec": round(t_rerank, 2),
                 "generate_sec": round(t_generate, 2),
                 "critique_sec": round(t_critique, 2),
+                "retry_sec": round(t_retry, 2),
                 "total_sec": round(time.time() - t0, 2),
             },
             "usage": cache_stats,
             "critique": critique,
+            "verifier": verifier,
+            "retry": {"count": retry_count, "reason": retry_reason},
         },
     )
 
@@ -1395,11 +1582,105 @@ def query_stream(req: QueryRequest, x_api_token: str | None = Header(default=Non
         # Phase 7: conversation history 저장 (다음 turn 활용)
         update_conversation(conv_id, req.question, answer_full)
 
-        # Phase 5: self-critique → SSE 'critique' event
+        # Phase 5: self-critique + deterministic citation verifier → SSE events
         t3 = time.time()
         critique = critique_answer(req.question, context, answer_full)
+        verifier = verify_citations(answer_full, top)
         t_critique = time.time() - t3
         yield _sse("critique", critique)
+        yield _sse("verifier", verifier)
+
+        # Phase 5b: critique/verifier-driven retry (streaming). agent loop 한 번 더 — tool 사용 허용.
+        # client에는 'regenerating' 이벤트 먼저 보내 답변 영역을 reset하도록 신호.
+        retry_count = 0
+        retry_reason = "ok"
+        t_retry = 0.0
+        do_retry, retry_reason = should_retry(critique, verifier)
+        if do_retry:
+            retry_count = 1
+            retry_msg = build_retry_user_message(req.question, context, answer_full, critique, verifier)
+            yield _sse("regenerating", {
+                "reason": retry_reason,
+                "critique": critique,
+            })
+            t_retry_start = time.time()
+            try:
+                # 새 agent loop. history는 retry용으로 비우고 retry message 단독.
+                messages_retry: list[dict[str, Any]] = [{"role": "user", "content": retry_msg}]
+                accumulated_retry: list[str] = []
+                tool_calls_retry: list[dict[str, Any]] = []
+                iter_count_retry = 0
+                for iter_n in range(MAX_TOOL_ITERATIONS):
+                    iter_count_retry = iter_n + 1
+                    with client.messages.stream(
+                        model=CLAUDE_MODEL,
+                        max_tokens=MAX_ANSWER_TOKENS,
+                        thinking={"type": "enabled", "budget_tokens": THINKING_BUDGET_TOKENS},
+                        system=SYSTEM_PROMPT_CACHED,
+                        messages=messages_retry,
+                        tools=TOOLS,
+                    ) as rstream:
+                        for event in rstream:
+                            et = getattr(event, "type", "")
+                            if et == "content_block_delta":
+                                delta = getattr(event, "delta", None)
+                                if delta and getattr(delta, "type", "") == "text_delta":
+                                    accumulated_retry.append(delta.text)
+                                    yield _sse("token", {"text": delta.text})
+                        final_r = rstream.get_final_message()
+                        ur = final_r.usage
+                        for k in ("input_tokens", "output_tokens",
+                                  "cache_creation_input_tokens", "cache_read_input_tokens"):
+                            v = getattr(ur, k, None) or 0
+                            cache_stats[k] = (cache_stats.get(k) or 0) + v
+                    if getattr(final_r, "stop_reason", None) != "tool_use":
+                        break
+                    messages_retry.append({"role": "assistant", "content": final_r.content})
+                    tr_payload: list[dict[str, Any]] = []
+                    for block in final_r.content:
+                        if getattr(block, "type", "") != "tool_use":
+                            continue
+                        tname = block.name
+                        tinput = block.input
+                        yield _sse("tool_call", {"name": tname, "input": tinput, "iteration": iter_count_retry, "phase": "retry"})
+                        t_tool = time.time()
+                        result = execute_tool(tname, tinput)
+                        elapsed_tool = round(time.time() - t_tool, 2)
+                        result_str = json.dumps(result, ensure_ascii=False)
+                        tool_calls_retry.append({
+                            "name": tname, "input": tinput,
+                            "result_size": len(result_str), "elapsed_sec": elapsed_tool,
+                            "result_count": result.get("count") if isinstance(result, dict) else None,
+                            "phase": "retry",
+                        })
+                        yield _sse("tool_result", {
+                            "name": tname,
+                            "result_count": result.get("count") if isinstance(result, dict) else None,
+                            "elapsed_sec": elapsed_tool,
+                            "phase": "retry",
+                        })
+                        tr_payload.append({
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": result_str,
+                        })
+                    messages_retry.append({"role": "user", "content": tr_payload})
+                answer_retry = "".join(accumulated_retry).strip()
+                if answer_retry:
+                    answer_full = answer_retry
+                    # conversation history도 retry 답변으로 갱신.
+                    update_conversation(conv_id, req.question, answer_full)
+                    tool_calls_made.extend(tool_calls_retry)
+                    iter_count += iter_count_retry
+                    # 재검증
+                    critique = critique_answer(req.question, context, answer_full)
+                    verifier = verify_citations(answer_full, top)
+                    yield _sse("critique", critique)
+                    yield _sse("verifier", verifier)
+            except Exception as exc:
+                logger.warning("stream retry 실패: %s", exc)
+                yield _sse("error", {"message": f"retry 중 오류: {type(exc).__name__}: {exc}"})
+            t_retry = time.time() - t_retry_start
 
         yield _sse("done", {
             "debug": {
@@ -1410,10 +1691,13 @@ def query_stream(req: QueryRequest, x_api_token: str | None = Header(default=Non
                     "rerank_sec": round(t_rerank, 2),
                     "generate_sec": round(t_generate, 2),
                     "critique_sec": round(t_critique, 2),
+                    "retry_sec": round(t_retry, 2),
                     "total_sec": round(time.time() - t0, 2),
                 },
                 "usage": cache_stats,
                 "critique": critique,
+                "verifier": verifier,
+                "retry": {"count": retry_count, "reason": retry_reason},
                 "agent": {
                     "iterations": iter_count,
                     "tool_calls": tool_calls_made,

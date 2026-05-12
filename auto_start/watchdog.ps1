@@ -6,6 +6,10 @@ $ErrorActionPreference = "Continue"
 
 $Project     = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $Python      = Join-Path $Project ".venv\Scripts\python.exe"
+$ChromaExe   = Join-Path $Project ".venv\Scripts\chroma.exe"
+$ChromaPath  = "D:\rag_data\chroma_db"
+$ChromaHost  = "127.0.0.1"
+$ChromaPort  = 8001
 $LogDir      = Join-Path $Project "logs"
 $Cloudflared = "C:\Users\yoonseok.moon\AppData\Local\Microsoft\WinGet\Packages\Cloudflare.cloudflared_Microsoft.Winget.Source_8wekyb3d8bbwe\cloudflared.exe"
 $PageBase    = "https://moon470an-sys.github.io/Indonesia-Law-Q-A/"
@@ -37,6 +41,7 @@ public static class SleepGuard {
 Write-WLog "=== watchdog started (pid=$PID) sleep prevention active ==="
 
 if (-not (Test-Path $Python))      { Write-WLog "FATAL: python.exe missing ($Python)"; exit 1 }
+if (-not (Test-Path $ChromaExe))   { Write-WLog "FATAL: chroma.exe missing ($ChromaExe)"; exit 1 }
 if (-not (Test-Path $Cloudflared)) { Write-WLog "FATAL: cloudflared.exe missing"; exit 1 }
 if (-not (Test-Path (Join-Path $Project ".env"))) { Write-WLog "FATAL: .env missing"; exit 1 }
 
@@ -58,21 +63,82 @@ function Test-TunnelHealth {
     } catch { return $false }
 }
 
-function Stop-AllUvicorn {
-    Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
-        Where-Object { $_.CommandLine -match "rag_server:app" -or ($_.CommandLine -match "uvicorn" -and $_.CommandLine -match "rag_server") } |
-        ForEach-Object {
-            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-            Write-WLog "  killed old uvicorn pid=$($_.ProcessId)"
+$UvicornPidFile     = Join-Path $LogDir "uvicorn.pid"
+$CloudflaredPidFile = Join-Path $LogDir "cloudflared.pid"
+$ChromaPidFile      = Join-Path $LogDir "chroma.pid"
+
+function Stop-PidFromFile {
+    # WMI/CIM (Get-CimInstance Win32_Process)는 좀비 프로세스가 쌓이면 hang하는 사례 있음.
+    # PID 파일로 watchdog가 직접 띄운 프로세스만 식별해서 종료한다.
+    param([string]$PidFile, [string]$Label)
+    if (-not (Test-Path $PidFile)) { return }
+    $oldPid = (Get-Content $PidFile -Raw -ErrorAction SilentlyContinue).Trim()
+    if ($oldPid) {
+        $p = Get-Process -Id $oldPid -ErrorAction SilentlyContinue
+        if ($p) {
+            Stop-Process -Id $oldPid -Force -ErrorAction SilentlyContinue
+            Write-WLog "  killed old $Label pid=$oldPid"
         }
+    }
+    Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
+}
+
+function Stop-AllUvicorn {
+    Stop-PidFromFile -PidFile $UvicornPidFile -Label "uvicorn"
+}
+
+function Test-ChromaHealth {
+    # TCP connect on $ChromaPort — chroma server LISTEN이면 OK. API 버전(v1/v2) 의존 안 함.
+    try {
+        $c = New-Object System.Net.Sockets.TcpClient
+        $async = $c.BeginConnect($ChromaHost, $ChromaPort, $null, $null)
+        $ok = $async.AsyncWaitHandle.WaitOne(2000, $false)
+        if ($ok -and $c.Connected) { $c.EndConnect($async); $c.Close(); return $true }
+        $c.Close()
+        return $false
+    } catch { return $false }
+}
+
+function Stop-AllChroma {
+    Stop-PidFromFile -PidFile $ChromaPidFile -Label "chroma"
+    # 추가 안전망: stray chroma.exe도 정리. Get-Process는 WMI 안 씀.
+    Get-Process chroma -ErrorAction SilentlyContinue | ForEach-Object {
+        Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+        Write-WLog "  killed stray chroma pid=$($_.Id)"
+    }
+}
+
+function Start-Chroma {
+    Write-WLog "starting chroma..."
+    Stop-AllChroma
+    Start-Sleep -Seconds 2
+    $chOut = Join-Path $LogDir "chroma_server.log"
+    $chErr = Join-Path $LogDir "chroma_server.err"
+    $proc = Start-Process -FilePath $ChromaExe `
+        -ArgumentList "run","--path",$ChromaPath,"--host",$ChromaHost,"--port","$ChromaPort" `
+        -WorkingDirectory $Project -WindowStyle Hidden `
+        -RedirectStandardOutput $chOut -RedirectStandardError $chErr -PassThru
+    "$($proc.Id)" | Out-File -FilePath $ChromaPidFile -Encoding ascii -NoNewline
+    Write-WLog "  chroma pid=$($proc.Id), polling TCP $ChromaHost`:$ChromaPort up to 5 min"
+    # cold start: 인덱스 mmap 시간 필요. 250만 청크면 1~3분 예상.
+    for ($i = 0; $i -lt 75; $i++) {
+        if (Test-ChromaHealth) {
+            Write-WLog "  chroma healthy after $($i*4)s"
+            return $true
+        }
+        Start-Sleep -Seconds 4
+    }
+    Write-WLog "  ERR: chroma did not bind $ChromaPort in 5 min"
+    return $false
 }
 
 function Stop-AllCloudflared {
-    Get-CimInstance Win32_Process -Filter "Name='cloudflared.exe'" |
-        ForEach-Object {
-            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-            Write-WLog "  killed old cloudflared pid=$($_.ProcessId)"
-        }
+    Stop-PidFromFile -PidFile $CloudflaredPidFile -Label "cloudflared"
+    # 추가 안전망: 다른 경로로 떠 있는 stray cloudflared까지 정리. Get-Process는 WMI 안 씀.
+    Get-Process cloudflared -ErrorAction SilentlyContinue | ForEach-Object {
+        Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+        Write-WLog "  killed stray cloudflared pid=$($_.Id)"
+    }
 }
 
 function Invoke-HealthPrewarm {
@@ -95,9 +161,10 @@ function Start-Uvicorn {
     $uvLog = Join-Path $LogDir "uvicorn.log"
     $uvErr = Join-Path $LogDir "uvicorn.err"
     $proc = Start-Process -FilePath $Python `
-        -ArgumentList "-m","uvicorn","rag_server:app","--host","127.0.0.1","--port","8000" `
+        -ArgumentList "-m","uvicorn","rag_server_v2:app","--host","127.0.0.1","--port","8000" `
         -WorkingDirectory $Project -WindowStyle Hidden `
         -RedirectStandardOutput $uvLog -RedirectStandardError $uvErr -PassThru
+    "$($proc.Id)" | Out-File -FilePath $UvicornPidFile -Encoding ascii -NoNewline
     Write-WLog "  uvicorn pid=$($proc.Id), polling /health up to 10 min"
     for ($i = 0; $i -lt 150; $i++) {
         if (Test-UvicornHealth) {
@@ -124,6 +191,7 @@ function Start-Cloudflared {
             -ArgumentList "tunnel","--url","http://127.0.0.1:8000" `
             -WindowStyle Hidden `
             -RedirectStandardOutput $cfOut -RedirectStandardError $cfErr -PassThru
+        "$($proc.Id)" | Out-File -FilePath $CloudflaredPidFile -Encoding ascii -NoNewline
         Write-WLog "  attempt $attempt cloudflared pid=$($proc.Id)"
         $url = $null
         $bad = $false
@@ -189,18 +257,39 @@ $currentTunnel = ""
 if (Test-Path $TunnelTxt) { $currentTunnel = (Get-Content $TunnelTxt -Raw).Trim() }
 Write-WLog "boot: known tunnel = $currentTunnel"
 
+# 부팅 시점 chroma 즉시 기동. RAG_CHROMA_MODE=http에서 rag_server가 8001로 붙어야 동작.
+if (-not (Test-ChromaHealth)) {
+    if (-not (Start-Chroma)) {
+        Write-WLog "boot: chroma start failed, will retry in main loop"
+    }
+}
+
 $lastHealthRefresh = [DateTime]::MinValue
 
 while ($true) {
     try {
+        # 0) ChromaDB 데몬 — uvicorn보다 먼저 살아있어야 함. 죽으면 rag_server가 /query에서 실패.
+        # TCP 체크 1회 실패 시 즉시 재시작 (uvicorn처럼 일시적 busy로 응답 못 하는 케이스 거의 없음).
+        if (-not (Test-ChromaHealth)) {
+            Write-WLog "chroma DOWN, restarting"
+            if (-not (Start-Chroma)) {
+                Write-WLog "chroma restart failed; sleep 60s and retry"
+                Start-Sleep -Seconds 60
+                continue
+            }
+        }
+
         $uvOk = Test-UvicornHealth
         if (-not $uvOk) {
-            # 한 번 실패는 무시하고 잠깐 후 재확인. 연속 2회 실패해야 재시작.
-            Start-Sleep -Seconds 10
-            $uvOk = Test-UvicornHealth
+            # /query처럼 무거운 요청 처리 중이면 /healthz가 일시적으로 응답 못함.
+            # 5회 연속 실패(약 2.5분 grace)해야 정말 죽었다고 판단. 무차별 재시작 cycle 방지.
+            for ($p = 1; $p -le 4; $p++) {
+                Start-Sleep -Seconds 30
+                if (Test-UvicornHealth) { $uvOk = $true; break }
+            }
         }
         if (-not $uvOk) {
-            Write-WLog "uvicorn DOWN (2 consecutive checks failed), restarting"
+            Write-WLog "uvicorn DOWN (5 consecutive checks over ~2.5min failed), restarting"
             $lastHealthRefresh = [DateTime]::MinValue  # 새 uvicorn이면 prewarm이 새로 채움
             if (-not (Start-Uvicorn)) {
                 Write-WLog "uvicorn restart failed; sleep 60s and retry"
@@ -210,14 +299,12 @@ while ($true) {
             $lastHealthRefresh = Get-Date  # Start-Uvicorn 내부에서 prewarm 호출됨
         }
 
-        # /health keep-alive: 4분에 한 번씩 호출해서 캐시 TTL 안에서 갱신.
-        # 옛 uvicorn(TTL=300)이든 새 uvicorn(TTL=86400)이든 캐시가 만료 직전에 채워짐.
-        # 그러면 사용자가 /health?quick=1 호출해도 항상 cache hit (warming=false).
-        if (((Get-Date) - $lastHealthRefresh).TotalMinutes -ge 4) {
+        # /health keep-alive 제거: cold start 중에 추가 부하 → /query 더 느려짐 → /healthz timeout → 재시작 cycle.
+        # rag_server의 HEALTH_CACHE_TTL=24h라 한번 채워지면 굳이 keep-alive 필요 없음.
+        if ($false -and ((Get-Date) - $lastHealthRefresh).TotalMinutes -ge 4) {
             try {
                 Invoke-WebRequest -Uri "http://127.0.0.1:8000/health" -UseBasicParsing -TimeoutSec 60 | Out-Null
                 $lastHealthRefresh = Get-Date
-                # 정상 시엔 로그 안 남김 (4분마다 노이즈 방지). 실패할 때만 기록.
             } catch {
                 Write-WLog "  /health keep-alive failed: $_"
             }

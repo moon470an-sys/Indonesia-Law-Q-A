@@ -19,6 +19,11 @@ data/chroma_db/
 # 자동시작 런타임 산출물
 logs/
 .tunnel_url
+.last_ingest_stamp
+*.bak
+
+# Claude Code 로컬 설정
+.claude/
 
 # IDE
 .vscode/

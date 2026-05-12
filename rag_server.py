@@ -47,7 +47,38 @@ EMBEDDING_MODEL = os.getenv(
     "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
 )
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
-TOP_K_DEFAULT = 5
+TOP_K_DEFAULT = 15
+MAX_ANSWER_TOKENS = 4096
+
+# Retrieval re-ranking. cosine distance에 weight을 곱해 effective distance를 만든 뒤 정렬한다.
+# 작을수록 우대. dense retrieval만으로는 한국어 query가 모든 법령의 도입부(Menimbang) 페이지와
+# 유사하게 매칭되는 문제가 있어, 위계/페이지 기반 weight으로 균형을 잡는다.
+
+# 상위법 우선 (SYSTEM_PROMPT의 위계 규칙과 일치). 헌법은 488청크라 dense retrieval만으로는
+# 거대 카테고리에 묻혀 0개 나오는 케이스가 관측됐음 (2026-05-11).
+HIERARCHY_WEIGHTS = {
+    "indonesia_constitution": 0.80,
+    "indonesia_uu": 0.88,
+    "indonesia_pp": 0.92,
+    "indonesia_perpres": 0.94,
+    "indonesia_permen": 0.96,
+    "indonesia_kepmen": 0.97,
+    "indonesia_perda": 0.97,
+    "indonesia_lainnya": 1.00,
+}
+DEFAULT_HIERARCHY_WEIGHT = 1.0
+
+# 사용자가 categories 미지정한 일반 query일 때만 적용. 위계 균형 보장.
+MINIMUM_QUOTA = {
+    "indonesia_constitution": 3,
+    "indonesia_uu": 4,
+    "indonesia_pp": 2,
+}
+
+# 도입부(표지/Menimbang/Penjelasan) 페이지는 거의 모든 법령에서 비슷한 문구가 반복되어
+# 일반 query에서 잡힐 확률이 너무 높음. 본문(BAB II 이상, page≥3) 우선.
+EARLY_PAGE_THRESHOLD = 2
+EARLY_PAGE_PENALTY = 1.15
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 ALLOWED_ORIGINS = [
@@ -276,8 +307,14 @@ def build_context(docs: list[str], metas: list[dict]) -> str:
 def search_all_collections(
     query_emb: list[list[float]], top_k: int, categories: list[str] | None,
 ) -> tuple[list[str], list[dict], list[float]]:
-    """모든 indonesia_* 컬렉션에서 top_k씩 가져와 거리 기준으로 통합 후 상위 top_k 반환."""
+    """가중치 reranking + 위계 quota 적용한 multi-collection retrieval.
+
+    각 컬렉션에서 fetch_k(= top_k*3) 후보를 가져와, 위계 가중치/페이지 페널티를 곱한
+    effective distance로 정렬한다. 사용자가 categories 미지정한 경우에는 위계 quota를
+    먼저 채워 헌법/법률이 거대 카테고리에 묻히는 현상을 방지한다.
+    """
     cols = list_indonesia_collections()
+    user_filtered = bool(categories)
     if categories:
         wanted = set()
         for c in categories:
@@ -291,28 +328,75 @@ def search_all_collections(
                 wanted.add(normalize_category(c.strip()))
         cols = [c for c in cols if c.name in wanted]
 
-    all_docs: list[str] = []
-    all_metas: list[dict] = []
-    all_dists: list[float] = []
+    fetch_k = max(top_k * 3, 20)
+    candidates: list[tuple[float, float, str, dict, str]] = []
 
     for col in cols:
         try:
-            res = col.query(query_embeddings=query_emb, n_results=top_k)
+            res = col.query(query_embeddings=query_emb, n_results=fetch_k)
         except Exception:
             continue
         docs = (res.get("documents") or [[]])[0]
         metas = (res.get("metadatas") or [[]])[0]
         dists = (res.get("distances") or [[]])[0]
-        all_docs.extend(docs)
-        all_metas.extend(metas)
-        all_dists.extend(dists)
+        col_weight = HIERARCHY_WEIGHTS.get(col.name, DEFAULT_HIERARCHY_WEIGHT)
+        for doc, meta, dist in zip(docs, metas, dists):
+            try:
+                page_num = int(meta.get("page", 99) or 99)
+            except (ValueError, TypeError):
+                page_num = 99
+            page_pen = EARLY_PAGE_PENALTY if page_num <= EARLY_PAGE_THRESHOLD else 1.0
+            eff = (dist if dist is not None else 1.0) * col_weight * page_pen
+            candidates.append((eff, dist, doc, meta, col.name))
 
-    if not all_docs:
+    if not candidates:
         return [], [], []
 
-    # 거리 오름차순 정렬 후 top_k
-    order = sorted(range(len(all_dists)), key=lambda i: all_dists[i])[:top_k]
-    return [all_docs[i] for i in order], [all_metas[i] for i in order], [all_dists[i] for i in order]
+    candidates.sort(key=lambda t: t[0])
+
+    def _dedup_key(meta: dict) -> tuple:
+        return (meta.get("source"), meta.get("page"), meta.get("article"))
+
+    selected: list[tuple[float, float, str, dict, str]] = []
+    seen: set = set()
+
+    # Quota 먼저 — 사용자가 categories 미지정한 일반 query 에서만.
+    # categories 지정한 경우엔 그 카테고리만 보고 싶다는 뜻이라 quota 강제 안 함.
+    if not user_filtered:
+        for col_name, quota in MINIMUM_QUOTA.items():
+            taken = 0
+            for tup in candidates:
+                if tup[4] != col_name:
+                    continue
+                k = _dedup_key(tup[3])
+                if k in seen:
+                    continue
+                selected.append(tup)
+                seen.add(k)
+                taken += 1
+                if taken >= quota:
+                    break
+
+    # 나머지를 effective distance 기준으로 채움
+    for tup in candidates:
+        if len(selected) >= top_k:
+            break
+        k = _dedup_key(tup[3])
+        if k in seen:
+            continue
+        selected.append(tup)
+        seen.add(k)
+
+    # quota 합계가 top_k를 초과하면 잘라낸다 (작은 top_k 케이스 보호)
+    selected = selected[:top_k]
+    # 최종 정렬: effective distance 오름차순으로 사용자에게 표시
+    selected.sort(key=lambda t: t[0])
+
+    docs_out = [t[2] for t in selected]
+    metas_out = [t[3] for t in selected]
+    # 원본 distance 반환 — /query 응답의 score는 사용자가 이해하기 쉬운 raw cosine 기준.
+    dists_out = [t[1] for t in selected]
+    return docs_out, metas_out, dists_out
 
 
 def _warmup_sync() -> None:
@@ -497,7 +581,7 @@ def query(req: QueryRequest, x_api_token: str | None = Header(default=None)) -> 
 
     response = client.messages.create(
         model=CLAUDE_MODEL,
-        max_tokens=1024,
+        max_tokens=MAX_ANSWER_TOKENS,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_message}],
     )

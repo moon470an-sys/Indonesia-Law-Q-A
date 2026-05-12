@@ -61,6 +61,23 @@ ans6 = (
 v6 = r.verify_citations(ans6, retrieved)
 case("다중 인용 total=3 verified=3", (3, 3), (v6["total"], v6["verified"]))
 
+# (7) 본문 fallback — article metadata는 'BAB II'이지만 본문에 "Pasal 7"이 포함된 케이스
+retrieved_fb = [
+    {"metadata": {"source": "UU_12_Tahun_2011.pdf", "page": 1, "article": "BAB II"},
+     "text": "Pasal 7 ayat (1) Jenis dan hierarki Peraturan Perundang-undangan terdiri atas..."},
+]
+v7 = r.verify_citations("(Pasal 7 ayat (1), 출처: UU_12_Tahun_2011.pdf, p.1)", retrieved_fb)
+case("본문 fallback verified=1", 1, v7["verified"])
+case("본문 fallback reason=body_fallback", "body_fallback", v7["items"][0]["reason"])
+
+# (8) word boundary — "Pasal 7" 인용이 "Pasal 71"에 잘못 매치되면 안 됨
+retrieved_wb = [
+    {"metadata": {"source": "UU_12_Tahun_2011.pdf", "page": 1, "article": "BAB X"},
+     "text": "Pasal 71 menentukan jenis Peraturan Perundang-undangan tertentu."},
+]
+v8 = r.verify_citations("(Pasal 7, 출처: UU_12_Tahun_2011.pdf, p.1)", retrieved_wb)
+case("word boundary — Pasal 7 != Pasal 71", "article_mismatch", v8["items"][0]["status"])
+
 
 print("\n###### should_retry ######")
 # critique unknown + no verifier → no retry

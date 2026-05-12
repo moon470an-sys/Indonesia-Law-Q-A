@@ -844,11 +844,34 @@ def verify_citations(answer: str, retrieved: list[dict]) -> dict:
             for m in candidates
         )
         page_ok = any(int(m.get("page", -2) or -2) == page_int for m in candidates)
+
+        # Fallback: chunking 단계에서 article 추출이 부정확한 케이스 (Pasal X 본문이 BAB II 등
+        # 다른 article로 marked) 흡수. 같은 source의 retrieved 청크 본문에서 word-boundary로
+        # pasal_key를 직접 검색. 본문 내 매치 = verified.
+        used_body_fallback = False
+        if not art_ok:
+            pasal_rx = re.compile(r"\b" + re.escape(pasal_key) + r"\b", re.IGNORECASE)
+            for c in retrieved:
+                m = c.get("metadata") if isinstance(c, dict) else None
+                if not m or str(m.get("source", "")).strip().lower() != src_low:
+                    continue
+                body = str(c.get("text") or "")
+                if pasal_rx.search(body):
+                    art_ok = True
+                    used_body_fallback = True
+                    try:
+                        if int(m.get("page", -2) or -2) == page_int:
+                            page_ok = True
+                    except (ValueError, TypeError):
+                        pass
+                    break
+
         if art_ok and page_ok:
             verified += 1
             items.append({
                 "raw": match.group(0), "pasal": pasal_raw, "source": src_raw, "page": page_int,
-                "status": "verified", "reason": "ok",
+                "status": "verified",
+                "reason": "body_fallback" if used_body_fallback else "ok",
             })
         elif art_ok:
             items.append({

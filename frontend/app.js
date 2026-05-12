@@ -1188,6 +1188,59 @@ async function postQueryOnce(base, q, topK) {
   return r.json();
 }
 
+// SSE 클라이언트 — /query/stream consume.
+// callbacks: { sources, token, done, error } — 각 event name별 핸들러.
+async function postQueryStream(base, q, topK, callbacks) {
+  const body = { question: q, top_k: topK };
+  if (selectedCategories.size) body.categories = [...selectedCategories];
+  const ctrl = new AbortController();
+  const timeoutId = setTimeout(() => ctrl.abort(), 300000); // 5분 안전망
+  try {
+    const resp = await fetch(`${base}/query/stream`, {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: ctrl.signal,
+    });
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(`HTTP ${resp.status} ${text.slice(0, 200)}`);
+    }
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let buffer = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      // SSE event 단위 split. event 사이 \n\n.
+      const events = buffer.split("\n\n");
+      buffer = events.pop(); // 마지막 미완 이벤트는 buffer로 유지
+      for (const ev of events) {
+        if (!ev.trim()) continue;
+        let eventName = null;
+        let dataStr = "";
+        for (const line of ev.split("\n")) {
+          if (line.startsWith("event:")) eventName = line.slice(6).trim();
+          else if (line.startsWith("data:")) dataStr += line.slice(5).trim();
+        }
+        if (!eventName || !dataStr) continue;
+        let parsed;
+        try {
+          parsed = JSON.parse(dataStr);
+        } catch (e) {
+          console.warn("SSE parse fail", e, dataStr.slice(0, 100));
+          continue;
+        }
+        const handler = callbacks[eventName];
+        if (handler) handler(parsed);
+      }
+    }
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 async function askQuestion() {
   const q = els.question.value.trim();
   if (!q) return;
@@ -1214,10 +1267,48 @@ async function askQuestion() {
   els.history.prepend(skeleton);
   const stopStages = startProgressStages(skeleton);
 
+  // streaming UI 상태
+  let partialAnswer = "";
+  let receivedSources = [];
+  let renderRaf = 0;
+  const answerEl = skeleton.querySelector(".a");
+  const stageEl = skeleton.querySelector(".qa-progress-stage");
+  const flushAnswer = () => {
+    if (renderRaf) return;
+    renderRaf = requestAnimationFrame(() => {
+      answerEl.innerHTML = renderAnswer(partialAnswer) + '<span class="streaming-cursor">▌</span>';
+      renderRaf = 0;
+    });
+  };
+
+  const streamCallbacks = {
+    sources: (data) => {
+      receivedSources = data.sources || [];
+      stopStages();
+      if (stageEl) stageEl.textContent = `Claude가 답변 작성 중… (출처 ${receivedSources.length}개 확보)`;
+      // 스켈레톤 라인 제거 — 답변 영역을 빈 상태 + cursor로
+      answerEl.innerHTML = '<span class="streaming-cursor">▌</span>';
+    },
+    token: (data) => {
+      partialAnswer += data.text || "";
+      flushAnswer();
+    },
+    done: (data) => {
+      if (renderRaf) cancelAnimationFrame(renderRaf);
+      answerEl.innerHTML = renderAnswer(partialAnswer);
+    },
+    error: (data) => {
+      throw new Error(data.message || "stream error");
+    },
+  };
+
+  const runStream = async () => {
+    await postQueryStream(base, q, topK, streamCallbacks);
+  };
+
   try {
-    let data;
     try {
-      data = await postQueryOnce(base, q, topK);
+      await runStream();
     } catch (e) {
       // cloudflared URL이 바뀐 경우: tunnel.json refetch 후 한 번 재시도
       const newAuto = await fetchAutoUrl();
@@ -1226,7 +1317,16 @@ async function askQuestion() {
         localStorage.removeItem(LS_KEYS.url);
         setStatus(`URL 자동 갱신 (${newAuto}) 재시도 중…`, "info");
         base = newAuto;
-        data = await postQueryOnce(base, q, topK);
+        // 누적 상태 초기화 후 재시도
+        partialAnswer = "";
+        receivedSources = [];
+        answerEl.innerHTML = `
+          <div class="skeleton-line" style="width: 96%"></div>
+          <div class="skeleton-line" style="width: 88%"></div>
+          <div class="skeleton-line" style="width: 70%"></div>
+          <div class="skeleton-line" style="width: 92%"></div>
+          <div class="skeleton-line" style="width: 60%"></div>`;
+        await runStream();
       } else {
         throw e;
       }
@@ -1237,8 +1337,8 @@ async function askQuestion() {
     addHistoryItem({
       id: `qa_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       q,
-      a: data.answer,
-      sources: data.sources || [],
+      a: partialAnswer,
+      sources: receivedSources,
       scope,
       elapsedMs,
       ts: Date.now(),

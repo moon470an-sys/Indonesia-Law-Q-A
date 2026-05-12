@@ -1576,3 +1576,16 @@ body.modal-open { overflow: hidden; }
   /* 페이지 브레이크 힌트 */
   .qa + .qa { page-break-before: auto; }
 }
+
+/* === Streaming cursor (Phase 1b) === */
+.streaming-cursor {
+  display: inline-block;
+  margin-left: 2px;
+  font-weight: 400;
+  color: var(--accent, #4f46e5);
+  animation: streaming-blink 1s steps(2, start) infinite;
+}
+
+@keyframes streaming-blink {
+  to { visibility: hidden; }
+}

@@ -957,6 +957,40 @@ function saveHistoryItems(items) {
 
 let historyItems = [];
 
+// Phase 7: 현재 대화 세션 id. null이면 새 대화 시작, 값 있으면 follow-up.
+let currentConversationId = null;
+let currentConversationTurn = 0;
+
+function resetConversation() {
+  currentConversationId = null;
+  currentConversationTurn = 0;
+  updateConversationBadge();
+  setStatus("새 대화를 시작합니다", "info");
+}
+
+function updateConversationBadge() {
+  let badge = document.getElementById("conv-badge");
+  if (!badge) {
+    // 헤더의 askBtn 근처에 추가
+    const host = els.askBtn?.parentElement;
+    if (!host) return;
+    badge = document.createElement("button");
+    badge.id = "conv-badge";
+    badge.type = "button";
+    badge.className = "conv-badge";
+    badge.title = "현재 대화 세션. 클릭 시 새 대화 시작.";
+    badge.addEventListener("click", resetConversation);
+    host.appendChild(badge);
+  }
+  if (!currentConversationId) {
+    badge.textContent = "🆕 새 대화";
+    badge.dataset.active = "false";
+  } else {
+    badge.textContent = `💬 대화 ${currentConversationId.slice(0, 6)} · turn ${currentConversationTurn}`;
+    badge.dataset.active = "true";
+  }
+}
+
 function renderHistoryEmpty() {
   if (historyItems.length) return;
   els.history.innerHTML = `
@@ -1208,10 +1242,11 @@ async function postQueryOnce(base, q, topK) {
 }
 
 // SSE 클라이언트 — /query/stream consume.
-// callbacks: { sources, token, done, error } — 각 event name별 핸들러.
-async function postQueryStream(base, q, topK, callbacks) {
+// callbacks: { sources, token, done, error, conversation, intent, critique, tool_call, ... }
+async function postQueryStream(base, q, topK, callbacks, options = {}) {
   const body = { question: q, top_k: topK };
   if (selectedCategories.size) body.categories = [...selectedCategories];
+  if (options.conversationId) body.conversation_id = options.conversationId;
   const ctrl = new AbortController();
   const timeoutId = setTimeout(() => ctrl.abort(), 300000); // 5분 안전망
   try {
@@ -1301,7 +1336,17 @@ async function askQuestion() {
   };
 
   let receivedCritique = null;
+  let receivedConversation = null;
   const streamCallbacks = {
+    conversation: (data) => {
+      receivedConversation = data;
+      currentConversationId = data?.conversation_id || currentConversationId;
+      currentConversationTurn = data?.turn || currentConversationTurn;
+      updateConversationBadge();
+      if (stageEl && data?.is_followup) {
+        stageEl.textContent = `이전 대화 이어가기 (turn ${data.turn})… 벡터 검색 중`;
+      }
+    },
     sources: (data) => {
       receivedSources = data.sources || [];
       stopStages();
@@ -1334,7 +1379,9 @@ async function askQuestion() {
   };
 
   const runStream = async () => {
-    await postQueryStream(base, q, topK, streamCallbacks);
+    await postQueryStream(base, q, topK, streamCallbacks, {
+      conversationId: currentConversationId,
+    });
   };
 
   try {
@@ -1410,6 +1457,8 @@ document.addEventListener("keydown", (e) => {
 els.saveBtn?.addEventListener("click", saveSettings);
 els.healthBtn?.addEventListener("click", checkHealth);
 els.askBtn.addEventListener("click", askQuestion);
+// Phase 7: 페이지 로드 시 대화 뱃지 초기 표시
+updateConversationBadge();
 els.clearBtn.addEventListener("click", () => {
   if (!historyItems.length) return;
   if (confirm(`저장된 ${historyItems.length}개 질문을 모두 삭제하시겠습니까?`)) {

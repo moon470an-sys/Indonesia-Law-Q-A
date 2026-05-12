@@ -1628,3 +1628,26 @@ body.modal-open { overflow: hidden; }
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
+
+/* === Phase 7: Conversation badge === */
+.conv-badge {
+  margin-left: 0.6rem;
+  padding: 4px 10px;
+  border: 1px solid var(--border, #d1d5db);
+  border-radius: 999px;
+  background: transparent;
+  font-size: 0.8rem;
+  cursor: pointer;
+  color: var(--text, #374151);
+  transition: all 0.15s ease;
+}
+.conv-badge:hover {
+  background: var(--accent-bg, rgba(99, 102, 241, 0.08));
+  border-color: var(--accent, #6366f1);
+}
+.conv-badge[data-active="true"] {
+  background: var(--accent-bg, rgba(99, 102, 241, 0.12));
+  border-color: var(--accent, #6366f1);
+  color: var(--accent, #4f46e5);
+  font-weight: 500;
+}

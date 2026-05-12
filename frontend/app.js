@@ -1369,6 +1369,31 @@ async function askQuestion() {
         stageEl.textContent = `검증: ${txt}${issueCount ? ` (이슈 ${issueCount})` : ""}`;
       }
     },
+    verifier: (data) => {
+      // Phase 5b: deterministic citation verifier (정규식+metadata 매칭). LLM critique과 별도.
+      // critique 객체에 합쳐 history에 같이 저장.
+      if (data && receivedCritique) receivedCritique.verifier = data;
+      else if (data) receivedCritique = { verifier: data };
+      if (stageEl) {
+        const tot = data?.total || 0;
+        const unv = data?.unverified || 0;
+        if (tot > 0) {
+          const cur = stageEl.textContent || "";
+          stageEl.textContent = `${cur} · 인용검증 ${tot - unv}/${tot}${unv ? ` (미검증 ${unv})` : ""}`;
+        }
+      }
+    },
+    regenerating: (data) => {
+      // Phase 5b: critique이 hallucination/bad_citation/low confidence를 감지 →
+      // 서버가 답변을 다시 생성하기 시작. 답변 영역을 리셋하고 stage 메시지로 알림.
+      if (renderRaf) cancelAnimationFrame(renderRaf);
+      partialAnswer = "";
+      answerEl.innerHTML = '<span class="streaming-cursor">▌</span>';
+      const reason = data?.reason || "검수 결과 재작성";
+      if (stageEl) stageEl.textContent = `답변 재작성 중… (${reason})`;
+      // critique은 retry 직후 새 critique 이벤트로 다시 받음.
+      receivedCritique = null;
+    },
     done: (data) => {
       if (renderRaf) cancelAnimationFrame(renderRaf);
       answerEl.innerHTML = renderAnswer(partialAnswer);

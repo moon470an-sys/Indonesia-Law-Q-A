@@ -37,3 +37,4 @@ Thumbs.db
 cloudflared/
 *.json
 !frontend/**/*.json
+!.mcp.json

@@ -139,7 +139,9 @@ def hash_file(path: Path, chunk_size: int = 1 << 20) -> tuple[str, int, float]:
 
 
 # ============= PDF 파싱 / 청킹 (워커 프로세스에서 호출) =============
-# pypdf을 1차로 사용하고(빠름), 텍스트가 거의 안 나올 때만 pdfplumber로 fallback(정확).
+# PyMuPDF(fitz) 1차 — pypdf 대비 4~8x 빠르고 텍스트 품질 동등/우위.
+# pypdf는 PyMuPDF 실패 시 fallback. pdfplumber는 텍스트가 거의 안 나올 때만.
+import pymupdf  # noqa: E402
 import pypdf  # noqa: E402
 import pdfplumber  # noqa: E402
 
@@ -147,6 +149,9 @@ import pdfplumber  # noqa: E402
 CHUNK_SIZE = 700
 CHUNK_OVERLAP = 120
 MIN_TEXT_FALLBACK = 50  # 페이지당 텍스트가 이 이하면 pdfplumber 재시도
+# 단일 PDF 크기 상한 (바이트). 이보다 큰 파일은 워커가 OOM/멈춤을 유발하므로
+# 1차 패스에서는 건너뛴다 (별도 직렬 패스에서 처리). RAG_MAX_PDF_BYTES 환경변수로 override.
+MAX_PDF_BYTES = int(os.getenv("RAG_MAX_PDF_BYTES", str(60 * 1024 * 1024)))  # 60MB
 ARTICLE_PATTERN = re.compile(
     r"(Pasal\s+\d+[A-Za-z]?|Bab\s+[IVXLCDM]+|Pembukaan)",
     re.IGNORECASE,
@@ -180,8 +185,24 @@ def _chunk_text(text: str) -> Iterable[str]:
         start = max(end - CHUNK_OVERLAP, start + 1)
 
 
+def _extract_pages_pymupdf(pdf_path: Path) -> list[tuple[int, str]]:
+    """PyMuPDF(fitz)로 페이지 추출. pypdf 대비 4~8x 빠름."""
+    pages: list[tuple[int, str]] = []
+    doc = pymupdf.open(str(pdf_path))
+    try:
+        for page_num, page in enumerate(doc, start=1):
+            try:
+                text = page.get_text() or ""
+            except Exception:
+                text = ""
+            pages.append((page_num, text))
+    finally:
+        doc.close()
+    return pages
+
+
 def _extract_pages_pypdf(pdf_path: Path) -> list[tuple[int, str]]:
-    """pypdf로 페이지 추출. 빠르지만 단순한 layout만 잘 됨."""
+    """pypdf로 페이지 추출. PyMuPDF 실패 시 fallback."""
     pages: list[tuple[int, str]] = []
     reader = pypdf.PdfReader(str(pdf_path), strict=False)
     for page_num, page in enumerate(reader.pages, start=1):
@@ -207,22 +228,34 @@ def _extract_pages_pdfplumber(pdf_path: Path) -> list[tuple[int, str]]:
 
 
 def parse_pdf(pdf_path: Path) -> list[dict]:
-    """PDF → 청크. pypdf 1차, 텍스트가 거의 안 나오는 페이지만 pdfplumber로 보강."""
+    """PDF → 청크. PyMuPDF 1차 (가장 빠름), 실패 시 pypdf, 텍스트가 거의 없으면 pdfplumber."""
     try:
-        pages = _extract_pages_pypdf(pdf_path)
+        size = pdf_path.stat().st_size
+    except OSError as exc:
+        return [{"_error": f"stat:{type(exc).__name__}: {exc}"}]
+    if size > MAX_PDF_BYTES:
+        return [{"_error": f"oversize:{size} > MAX_PDF_BYTES={MAX_PDF_BYTES}"}]
+    pages: list[tuple[int, str]] = []
+    try:
+        pages = _extract_pages_pymupdf(pdf_path)
     except Exception:
         try:
-            pages = _extract_pages_pdfplumber(pdf_path)
-        except Exception as exc2:
-            return [{"_error": f"{type(exc2).__name__}: {exc2}"}]
+            pages = _extract_pages_pypdf(pdf_path)
+        except Exception:
+            try:
+                pages = _extract_pages_pdfplumber(pdf_path)
+            except Exception as exc2:
+                return [{"_error": f"{type(exc2).__name__}: {exc2}"}]
 
-    # 전체 텍스트가 너무 짧으면(≤MIN_TEXT_FALLBACK × 페이지수) 한 번 더 pdfplumber 시도
+    # 전체 텍스트가 너무 짧으면(≤MIN_TEXT_FALLBACK × 페이지수) pdfplumber로 한 번 더.
+    # 환경변수 RAG_SKIP_PDFPLUMBER_FALLBACK=1로 비활성화 가능 (대량 인덱싱 시 속도 우선).
     total_chars = sum(len(t) for _, t in pages)
-    if pages and total_chars < MIN_TEXT_FALLBACK * len(pages):
+    if (pages and total_chars < MIN_TEXT_FALLBACK * len(pages)
+            and not os.getenv("RAG_SKIP_PDFPLUMBER_FALLBACK")):
         try:
             pages = _extract_pages_pdfplumber(pdf_path)
         except Exception:
-            pass  # pypdf 결과 그대로 사용
+            pass  # 1차 결과 그대로 사용
 
     chunks: list[dict] = []
     for page_num, text in pages:

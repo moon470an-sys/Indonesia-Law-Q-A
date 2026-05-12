@@ -664,7 +664,7 @@ function formatRelativeTime(ts) {
 }
 
 function buildQaCard(item) {
-  const { q, a, sources = [], scope = [], elapsedMs, ts, id } = item;
+  const { q, a, sources = [], critique = null, scope = [], elapsedMs, ts, id } = item;
   const wrap = document.createElement("article");
   wrap.className = "qa";
   wrap.dataset.id = id;
@@ -708,6 +708,24 @@ function buildQaCard(item) {
     ? `<button class="qa-collapse" type="button" aria-pressed="false" aria-label="답변 접기/펼치기" title="긴 답변 접기/펼치기">▴ 접기</button>`
     : "";
   const starredCls = item.starred ? "is-starred" : "";
+  // Phase 5: critique 정보 (신뢰도 뱃지 + 이슈 리스트)
+  let critiqueHtml = "";
+  if (critique && typeof critique === "object") {
+    const conf = critique.confidence || "unknown";
+    const confClass = { high: "ok", medium: "warn", low: "err", unknown: "info" }[conf] || "info";
+    const confLabel = { high: "✓ 신뢰도 높음", medium: "⚠ 부분 미흡", low: "⚠ 검증 필요", unknown: "검증 미실행" }[conf] || conf;
+    const issues = Array.isArray(critique.issues) ? critique.issues : [];
+    const verifiedCount = critique.verified_citations_count || 0;
+    const summary = critique.summary || "";
+    const issuesHtml = issues.length
+      ? `<ul class="critique-issues">${issues.map(i => `<li><span class="ci-type">${escapeHtml(i.type || "")}</span> ${escapeHtml(i.description || "")}</li>`).join("")}</ul>`
+      : "";
+    critiqueHtml = `
+      <details class="critique critique-${confClass}" ${issues.length ? "open" : ""}>
+        <summary class="critique-summary">${escapeHtml(confLabel)} · 인용 검증 ${verifiedCount}건${issues.length ? ` · 이슈 ${issues.length}건` : ""}${summary ? " — " + escapeHtml(summary) : ""}</summary>
+        ${issuesHtml}
+      </details>`;
+  }
   wrap.innerHTML = `
     <header class="qa-head">
       <h3 class="q" title="클릭 → 입력창에 다시 채우기">Q. ${escapeHtml(q)}</h3>
@@ -720,6 +738,7 @@ function buildQaCard(item) {
     </header>
     <div class="qa-meta">${metaBits}</div>
     <div class="a">${renderAnswer(a)}</div>
+    ${critiqueHtml}
     <details class="sources" ${sources.length ? "open" : ""}>
       <summary>🔎 검색된 출처 ${sources.length}건</summary>
       ${buildSourceFilters(sources)}
@@ -1281,6 +1300,7 @@ async function askQuestion() {
     });
   };
 
+  let receivedCritique = null;
   const streamCallbacks = {
     sources: (data) => {
       receivedSources = data.sources || [];
@@ -1292,6 +1312,17 @@ async function askQuestion() {
     token: (data) => {
       partialAnswer += data.text || "";
       flushAnswer();
+    },
+    critique: (data) => {
+      // Phase 5: 답변 끝난 후 self-critique 결과
+      receivedCritique = data;
+      if (stageEl) {
+        const conf = data?.confidence || "unknown";
+        const map = { high: "✓ 신뢰도 높음", medium: "⚠ 부분 미흡", low: "⚠ 검증 필요", unknown: "검증 미실행" };
+        const txt = map[conf] || conf;
+        const issueCount = (data?.issues || []).length;
+        stageEl.textContent = `검증: ${txt}${issueCount ? ` (이슈 ${issueCount})` : ""}`;
+      }
     },
     done: (data) => {
       if (renderRaf) cancelAnimationFrame(renderRaf);
@@ -1339,6 +1370,7 @@ async function askQuestion() {
       q,
       a: partialAnswer,
       sources: receivedSources,
+      critique: receivedCritique,
       scope,
       elapsedMs,
       ts: Date.now(),

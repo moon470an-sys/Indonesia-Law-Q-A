@@ -1589,3 +1589,42 @@ body.modal-open { overflow: hidden; }
 @keyframes streaming-blink {
   to { visibility: hidden; }
 }
+
+/* === Phase 5: Self-critique 표시 === */
+.critique {
+  margin-top: 1rem;
+  padding: 0.75rem 1rem;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  border-left: 4px solid var(--muted, #9ca3af);
+  background: rgba(0, 0, 0, 0.03);
+}
+.critique-ok { border-left-color: #16a34a; background: rgba(22, 163, 74, 0.06); }
+.critique-warn { border-left-color: #ca8a04; background: rgba(202, 138, 4, 0.06); }
+.critique-err { border-left-color: #dc2626; background: rgba(220, 38, 38, 0.06); }
+.critique-info { border-left-color: #6b7280; background: rgba(107, 114, 128, 0.05); }
+.critique-summary {
+  cursor: pointer;
+  font-weight: 500;
+  outline: none;
+}
+.critique-summary::marker {
+  color: var(--muted, #9ca3af);
+}
+.critique-issues {
+  margin: 0.6rem 0 0 0;
+  padding-left: 1.5rem;
+  list-style: disc;
+  color: var(--text, #1f2937);
+}
+.critique-issues li { margin-bottom: 0.35rem; }
+.ci-type {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--accent-bg, rgba(99, 102, 241, 0.12));
+  font-size: 0.75rem;
+  margin-right: 0.4rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}

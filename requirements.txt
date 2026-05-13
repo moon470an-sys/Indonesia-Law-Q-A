@@ -9,3 +9,5 @@ anthropic
 python-dotenv
 requests
 pydantic
+rank-bm25
+numpy

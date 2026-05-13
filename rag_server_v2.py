@@ -61,11 +61,15 @@ CLAUDE_HAIKU = os.getenv("CLAUDE_HAIKU", "claude-haiku-4-5-20251001")
 TOP_K_DEFAULT = 15
 FETCH_PER_QUERY = 30        # 각 query embedding당 가져올 후보 수
 RERANK_POOL_SIZE = 50       # reranker에 보낼 후보 수
-MAX_ANSWER_TOKENS = 8192    # extended thinking budget + 실제 답변 token 합. thinking 2000 + 답변 ~6000.
+MAX_ANSWER_TOKENS = 8192    # 비-interleaved 경로의 thinking+답변 합. thinking 2000 + 답변 ~6000.
+MAX_ANSWER_TOKENS_INTERLEAVED = 16000  # interleaved thinking + agent loop는 thinking 자주 발생 → 여유.
 # Extended thinking — Sonnet 4.6/Opus 4.7에서 답변 전 추론 단계 명시적으로 사용.
 # 위계 충돌, 복합 비교, 다중 인용 같은 복잡 질문에서 답변 깊이가 크게 개선됨.
-# budget_tokens는 thinking 단계에서 사용할 최대 토큰 — 적당히 두면 비용/지연 균형.
 THINKING_BUDGET_TOKENS = 2000
+# Interleaved thinking (Phase 11): tool_use 사이사이 thinking block 허용 → 도구 결과 보고
+# 다음 행동을 추론. multi-hop 법령 추적·위임 분석에 효과적.
+THINKING_BUDGET_INTERLEAVED = 5000
+INTERLEAVED_BETA = "interleaved-thinking-2025-05-14"
 
 # 위계 가중치 (cosine distance에 곱하기)
 HIERARCHY_WEIGHTS = {
@@ -83,6 +87,16 @@ DEFAULT_HIERARCHY_WEIGHT = 1.0
 # Page 페널티 (도입부 후순위)
 EARLY_PAGE_THRESHOLD = 2
 EARLY_PAGE_PENALTY = 1.10
+
+# === Hybrid retrieval (Phase 10: BM25 + RRF + MMR) ===
+# 인니 법령 ID(UU 13/2003, Pasal 7) 정확 매칭은 dense보다 BM25가 강함.
+# Reciprocal Rank Fusion(RRF)로 dense·BM25 ranks를 합치고,
+# Maximal Marginal Relevance(MMR)로 같은 source/article 중복 청크를 줄임.
+BM25_DIR = Path(os.getenv("RAG_BM25_DIR", r"D:\rag_data\bm25"))
+BM25_DIR.mkdir(parents=True, exist_ok=True)
+RRF_K = 60                # RRF 상수 (검색 분야 표준값)
+MMR_LAMBDA = 0.7          # MMR relevance vs diversity 가중치
+BM25_FETCH_MULTIPLIER = 2 # BM25는 dense보다 후보 폭을 더 잡고 RRF에서 자연스레 솎임
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 ALLOWED_ORIGINS = [
@@ -104,6 +118,15 @@ def _env_bool(name: str, default: bool = False) -> bool:
     if raw is None or raw == "":
         return default
     return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+# Phase 11 feature flags — 모두 env로 토글 가능. 기본은 권장 on.
+INTERLEAVED_ENABLED = _env_bool("RAG_INTERLEAVED_THINKING", default=True)
+CROSS_ENCODER_ENABLED = _env_bool("RAG_USE_CROSS_ENCODER", default=True)
+CROSS_ENCODER_MODEL = os.getenv("RAG_CROSS_ENCODER_MODEL", "BAAI/bge-reranker-v2-m3")
+CROSS_ENCODER_CUT = int(os.getenv("RAG_CROSS_ENCODER_CUT", "20"))  # Haiku에 보낼 컷
+ADV_CRITIQUE_ENABLED = _env_bool("RAG_ADVERSARIAL_CRITIQUE", default=True)
+HIERARCHICAL_ENABLED = _env_bool("RAG_HIERARCHICAL_RETRIEVAL", default=True)
 
 
 def _read_policy_env() -> dict[str, Any]:
@@ -153,6 +176,8 @@ def require_token(x_api_token: str | None = Header(default=None)) -> None:
 
 _state: dict[str, Any] = {
     "embed_model": None,
+    "cross_encoder": None,           # Phase 11: BGE-reranker-v2-m3
+    "cross_encoder_failed": False,   # 로딩 1회 실패 시 다시 시도하지 않음
     "chroma_client": None,
     "anthropic": None,
     "health_cache": None,
@@ -164,6 +189,50 @@ _state: dict[str, Any] = {
 }
 
 HEALTH_CACHE_TTL = 86400.0
+
+# ===== 컬렉션별 고유 PDF 수 — manifest 기반 =====
+# chroma `col.get(include=["metadatas"])`로 큰 컬렉션(permen 55만+) 전체 메타데이터를
+# 끌어오는 건 timeout이 자주 발생해 except → 0으로 캐시되는 사고를 일으켰다.
+# ingest manifest에 카테고리별 PDF 정보(chunk_count 포함)가 정확히 있으므로
+# 그것을 mtime 기반으로 캐싱해서 사용한다.
+MANIFEST_PATH = Path(os.getenv("RAG_MANIFEST_PATH", r"D:\rag_data\manifest.json"))
+_manifest_cache: dict[str, Any] = {"mtime": None, "per_collection_docs": {}}
+
+
+def _load_doc_counts_from_manifest() -> dict[str, int]:
+    """manifest.json에서 v2 컬렉션명 기준 chunk_count>0 PDF 수 집계.
+    파일 mtime이 바뀐 경우에만 재로딩 (manifest 78MB → 매 호출마다 파싱은 부담)."""
+    try:
+        st = MANIFEST_PATH.stat()
+    except FileNotFoundError:
+        return {}
+    if _manifest_cache.get("mtime") == st.st_mtime:
+        return dict(_manifest_cache.get("per_collection_docs") or {})
+    try:
+        with open(MANIFEST_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as exc:
+        logger.warning("manifest 로드 실패: %s", exc)
+        return dict(_manifest_cache.get("per_collection_docs") or {})
+    counts: dict[str, int] = {}
+    for v in data.values():
+        if not isinstance(v, dict):
+            continue
+        try:
+            cc = int(v.get("chunk_count", 0) or 0)
+        except (TypeError, ValueError):
+            cc = 0
+        if cc <= 0:
+            continue
+        col = v.get("collection")
+        if not col:
+            continue
+        # manifest는 v1 컬렉션명('indonesia_X'), 라이브 v2 컬렉션은 'v2_indonesia_X'.
+        v2_col = col if col.startswith("v2_") else "v2_" + col
+        counts[v2_col] = counts.get(v2_col, 0) + 1
+    _manifest_cache["mtime"] = st.st_mtime
+    _manifest_cache["per_collection_docs"] = counts
+    return dict(counts)
 
 
 def get_embed_model():
@@ -194,6 +263,52 @@ def encode_query(texts: list[str]) -> list[list[float]]:
     return [v.astype("float32").tolist() for v in emb]
 
 
+def get_cross_encoder():
+    """BGE-reranker-v2-m3 lazy load. CPU. ~600MB. 실패 시 None — Claude reranker로 폴백."""
+    if not CROSS_ENCODER_ENABLED:
+        return None
+    if _state["cross_encoder"] is not None:
+        return _state["cross_encoder"]
+    if _state.get("cross_encoder_failed"):
+        return None
+    try:
+        from sentence_transformers import CrossEncoder
+        logger.info("Cross-encoder 로딩 시작 (%s, CPU)", CROSS_ENCODER_MODEL)
+        ce = CrossEncoder(CROSS_ENCODER_MODEL, max_length=512, device="cpu")
+        _state["cross_encoder"] = ce
+        logger.info("Cross-encoder 로딩 완료")
+        return ce
+    except Exception as exc:
+        logger.warning("Cross-encoder 로딩 실패 — Claude reranker only: %s", exc)
+        _state["cross_encoder_failed"] = True
+        return None
+
+
+def cross_encoder_score(question: str, candidates: list[dict], cut_to: int) -> list[dict]:
+    """Cross-encoder로 candidates 점수화 → 상위 cut_to개 반환. 각 c에 'ce_score' 부여.
+    실패 시 candidates를 그대로 cut_to까지 잘라 반환."""
+    if not candidates or cut_to <= 0:
+        return candidates[:cut_to]
+    if len(candidates) <= cut_to:
+        for c in candidates:
+            c.setdefault("ce_score", None)
+        return candidates
+    ce = get_cross_encoder()
+    if ce is None:
+        return candidates[:cut_to]
+    try:
+        pairs = [(question, clean_chunk(c.get("text") or "")[:1500]) for c in candidates]
+        scores = ce.predict(pairs, batch_size=16, show_progress_bar=False)
+        for c, s in zip(candidates, scores):
+            c["ce_score"] = float(s)
+        # 내림차순 정렬 후 cut
+        candidates.sort(key=lambda c: -(c.get("ce_score") or 0.0))
+        return candidates[:cut_to]
+    except Exception as exc:
+        logger.warning("cross-encoder predict 실패, 원순서로 cut: %s", exc)
+        return candidates[:cut_to]
+
+
 def get_chroma():
     if _state["chroma_client"] is None:
         _state["chroma_client"] = get_chroma_client()
@@ -211,6 +326,20 @@ def get_anthropic() -> Anthropic:
             raise RuntimeError("ANTHROPIC_API_KEY 없음")
         _state["anthropic"] = Anthropic(api_key=ANTHROPIC_API_KEY)
     return _state["anthropic"]
+
+
+def _agent_loop_kwargs() -> dict:
+    """tool_use 답변 생성용 공통 kwargs. interleaved thinking 활성화 시 budget·beta 헤더 적용."""
+    if INTERLEAVED_ENABLED:
+        return {
+            "max_tokens": MAX_ANSWER_TOKENS_INTERLEAVED,
+            "thinking": {"type": "enabled", "budget_tokens": THINKING_BUDGET_INTERLEAVED},
+            "extra_headers": {"anthropic-beta": INTERLEAVED_BETA},
+        }
+    return {
+        "max_tokens": MAX_ANSWER_TOKENS,
+        "thinking": {"type": "enabled", "budget_tokens": THINKING_BUDGET_TOKENS},
+    }
 
 
 # ===== 청크 텍스트 정리 (retrieve 후 안전망) =====
@@ -232,6 +361,209 @@ def clean_chunk(text: str) -> str:
     text = text.translate(_NOISE_TR)
     text = re.sub(r"[ \t]+", " ", text)
     return text.strip()
+
+
+# ===== Phase 10: BM25 인덱스 (lazy build, 디스크 캐시) =====
+# 글로벌 인덱스 — 모든 v2 컬렉션을 하나의 BM25에 담아 query당 1회만 평가.
+# 디스크 캐시는 fingerprint(총 청크 수) 변경 시 자동 무효화.
+
+_bm25_state: dict[str, Any] = {"global": None}
+_bm25_lock = threading.Lock()
+_BM25_GLOBAL_PATH = BM25_DIR / "global_v2.pkl"
+
+# 인니 법령 토큰화: 영숫자·한글 단위 + "13/2003" 같은 숫자/연도 슬래시 토큰 보존.
+_BM25_TOKEN_RE = re.compile(r"[A-Za-z가-힣]+|\d+(?:[/-]\d+)*")
+
+
+def _tokenize_bm25(text: str) -> list[str]:
+    if not text:
+        return []
+    return [t.lower() for t in _BM25_TOKEN_RE.findall(text)]
+
+
+def _build_bm25_global(cols: list, total_count: int) -> dict | None:
+    try:
+        from rank_bm25 import BM25Okapi
+    except ImportError:
+        logger.warning("rank_bm25 미설치 — BM25 비활성 (dense-only retrieval)")
+        return None
+    t0 = time.time()
+    ids: list[str] = []
+    texts: list[str] = []
+    metas: list[dict] = []
+    collections: list[str] = []
+    for col in cols:
+        try:
+            r = col.get(include=["documents", "metadatas"])
+        except Exception as exc:
+            logger.warning("BM25 build: col %s get 실패: %s", col.name, exc)
+            continue
+        col_ids = r.get("ids") or []
+        col_docs = r.get("documents") or []
+        col_metas = r.get("metadatas") or []
+        for cid, doc, meta in zip(col_ids, col_docs, col_metas):
+            ids.append(cid)
+            texts.append(doc or "")
+            metas.append(meta or {})
+            collections.append(col.name)
+    if not ids:
+        return None
+    logger.info("BM25 global 인덱스 토큰화 시작 (n=%d)", len(ids))
+    tokens = [_tokenize_bm25(t) for t in texts]
+    bm25 = BM25Okapi(tokens)
+    idx = {
+        "bm25": bm25,
+        "ids": ids,
+        "texts": texts,
+        "metas": metas,
+        "collections": collections,
+        "count": total_count,
+    }
+    try:
+        import pickle
+        with open(_BM25_GLOBAL_PATH, "wb") as f:
+            pickle.dump(idx, f)
+    except Exception as exc:
+        logger.warning("BM25 인덱스 디스크 저장 실패: %s", exc)
+    logger.info("BM25 global 인덱스 빌드 완료 (n=%d, %.1fs)", len(ids), time.time() - t0)
+    return idx
+
+
+def get_bm25_global() -> dict | None:
+    """글로벌 BM25 인덱스. 메모리/디스크 캐시 → 청크 수 변경 시 재빌드."""
+    with _bm25_lock:
+        cols = list_v2_collections()
+        try:
+            total_count = sum(c.count() for c in cols)
+        except Exception as exc:
+            logger.warning("BM25 fingerprint count 실패: %s", exc)
+            return _bm25_state.get("global")
+        cached = _bm25_state.get("global")
+        if cached and cached.get("count") == total_count:
+            return cached
+        if _BM25_GLOBAL_PATH.exists():
+            try:
+                import pickle
+                with open(_BM25_GLOBAL_PATH, "rb") as f:
+                    disk = pickle.load(f)
+                if disk.get("count") == total_count:
+                    _bm25_state["global"] = disk
+                    return disk
+            except Exception as exc:
+                logger.warning("BM25 인덱스 디스크 로드 실패: %s", exc)
+        return _build_bm25_global(cols, total_count)
+
+
+def bm25_search_global(query_text: str, top_n: int) -> list[tuple[str, str, dict, str, int]]:
+    """글로벌 BM25 검색. 반환: [(chunk_id, text, metadata, collection, bm25_rank), ...]."""
+    idx = get_bm25_global()
+    if not idx:
+        return []
+    tokens = _tokenize_bm25(query_text)
+    if not tokens:
+        return []
+    try:
+        import numpy as np
+    except ImportError:
+        return []
+    scores = idx["bm25"].get_scores(tokens)
+    if len(scores) == 0:
+        return []
+    n = min(top_n, len(scores))
+    # argpartition으로 top-n만 뽑고 그 안에서만 정렬 → 큰 corpus에서 빠름
+    part = np.argpartition(-scores, n - 1)[:n] if n < len(scores) else np.arange(len(scores))
+    order = part[np.argsort(-scores[part])]
+    out: list[tuple[str, str, dict, str, int]] = []
+    for rank, pos in enumerate(order):
+        s = float(scores[pos])
+        if s <= 0:
+            break
+        i = int(pos)
+        out.append((idx["ids"][i], idx["texts"][i], idx["metas"][i], idx["collections"][i], rank))
+    return out
+
+
+# ===== Phase 11: Hierarchical retrieval (document-level 1차) =====
+# comparison/hierarchy/case_application intent에서 source(법령 PDF)별 RRF score 집계 →
+# top-N source로 후보 한정 → 답변 출처가 흩뿌려지지 않고 핵심 법령에 집중.
+
+_HIERARCHICAL_INTENTS = {"comparison", "hierarchy", "case_application"}
+_HIERARCHICAL_TOP_SOURCES = {
+    "comparison": 4,
+    "hierarchy": 5,
+    "case_application": 5,
+}
+_HIERARCHICAL_MIN_KEEP = 12  # filter 후 너무 적으면 원본 반환
+
+
+def _hierarchical_filter(candidates: list[dict], intent: str) -> tuple[list[dict], dict]:
+    """source별 RRF 합산으로 top-N source 선정 후 그 source의 chunks만 통과시킴.
+    intent가 hierarchical 대상이 아니거나 필터링 결과가 너무 적으면 원본 반환.
+    """
+    info: dict = {"applied": False, "top_sources": [], "reason": ""}
+    if not HIERARCHICAL_ENABLED or intent not in _HIERARCHICAL_INTENTS:
+        info["reason"] = "disabled_or_intent_skip"
+        return candidates, info
+    src_scores: dict[str, float] = {}
+    for c in candidates:
+        src = ((c.get("metadata") or {}).get("source") or "").strip()
+        if not src:
+            continue
+        src_scores[src] = src_scores.get(src, 0.0) + (c.get("rrf_score") or 0.0)
+    if not src_scores:
+        info["reason"] = "no_sources"
+        return candidates, info
+    n = _HIERARCHICAL_TOP_SOURCES.get(intent, 4)
+    top_sources = [s for s, _ in sorted(src_scores.items(), key=lambda kv: -kv[1])[:n]]
+    keep = {s for s in top_sources}
+    filtered = [c for c in candidates if ((c.get("metadata") or {}).get("source") or "") in keep]
+    if len(filtered) < _HIERARCHICAL_MIN_KEEP:
+        info["reason"] = f"too_few_after_filter({len(filtered)})"
+        return candidates, info
+    info["applied"] = True
+    info["top_sources"] = top_sources
+    return filtered, info
+
+
+# ===== MMR (Maximal Marginal Relevance) =====
+# rerank 직전 candidates에서 같은 source/Pasal 중복을 솎아내 reranker 입력 다양성 확보.
+
+
+def _struct_sim(a: dict, b: dict) -> float:
+    am = a.get("metadata") or {}
+    bm = b.get("metadata") or {}
+    sa, sb = am.get("source"), bm.get("source")
+    if not sa or not sb or sa != sb:
+        return 0.0
+    aa = (am.get("article") or "").strip()
+    bb = (bm.get("article") or "").strip()
+    if aa and bb and aa == bb:
+        return 1.0
+    return 0.5
+
+
+def _mmr_select(candidates: list[dict], target_size: int, lambda_: float = MMR_LAMBDA) -> list[dict]:
+    if not candidates or target_size <= 0:
+        return []
+    if len(candidates) <= target_size:
+        return candidates
+    max_score = max((c.get("rrf_score") or 0.0) for c in candidates) or 1.0
+    pool = list(candidates)
+    selected: list[dict] = []
+    while pool and len(selected) < target_size:
+        best_idx = -1
+        best_mmr = float("-inf")
+        for i, c in enumerate(pool):
+            rel = (c.get("rrf_score") or 0.0) / max_score
+            max_sim = max((_struct_sim(c, s) for s in selected), default=0.0)
+            mmr = lambda_ * rel - (1.0 - lambda_) * max_sim
+            if mmr > best_mmr:
+                best_mmr = mmr
+                best_idx = i
+        if best_idx < 0:
+            break
+        selected.append(pool.pop(best_idx))
+    return selected
 
 
 # ===== Query 처리 (Phase 3: Intent + Sub-query + Multi-paragraph HyDE) =====
@@ -389,28 +721,33 @@ def multi_query_retrieve(
 
     fetch_per = strat["fetch_per_query"]
     candidates: dict[str, dict] = {}
+    rrf_scores: dict[str, float] = {}
+    col_names_filter = {c.name for c in cols}
+
+    # === Dense retrieval (per-query × per-collection) ===
     for (label, _qtext), emb in zip(queries, embeddings):
         for col in cols:
+            col_weight = HIERARCHY_WEIGHTS.get(col.name, DEFAULT_HIERARCHY_WEIGHT)
+            if auto_categories and col.name in auto_categories:
+                col_weight *= 0.92
             try:
                 res = col.query(query_embeddings=[emb], n_results=fetch_per)
             except Exception as exc:
-                logger.warning("col %s query 실패: %s", col.name, exc)
+                logger.warning("col %s dense query 실패: %s", col.name, exc)
                 continue
             ids = (res.get("ids") or [[]])[0]
             docs = (res.get("documents") or [[]])[0]
             metas = (res.get("metadatas") or [[]])[0]
             dists = (res.get("distances") or [[]])[0]
-            col_weight = HIERARCHY_WEIGHTS.get(col.name, DEFAULT_HIERARCHY_WEIGHT)
-            # auto_categories에 포함된 컬렉션이면 0.92 가중치 추가 적용 (boost)
-            if auto_categories and col.name in auto_categories:
-                col_weight *= 0.92
-            for cid, doc, meta, dist in zip(ids, docs, metas, dists):
+            for rank, (cid, doc, meta, dist) in enumerate(zip(ids, docs, metas, dists)):
                 try:
                     page_num = int(meta.get("page", 99) or 99)
                 except (ValueError, TypeError):
                     page_num = 99
                 page_pen = EARLY_PAGE_PENALTY if page_num <= EARLY_PAGE_THRESHOLD else 1.0
                 eff = (dist if dist is not None else 1.0) * col_weight * page_pen
+                # RRF: 1/(k+rank+1), col_weight로 나눠 위계 선호 유지
+                rrf_scores[cid] = rrf_scores.get(cid, 0.0) + (1.0 / (RRF_K + rank + 1)) / col_weight
                 prev = candidates.get(cid)
                 if prev is None or eff < prev["eff_dist"]:
                     candidates[cid] = {
@@ -423,7 +760,55 @@ def multi_query_retrieve(
                         "collection": col.name,
                     }
 
-    cand_list = sorted(candidates.values(), key=lambda c: c["eff_dist"])[: strat["rerank_pool"]]
+    # === BM25 retrieval (global, original + id_keywords만 — HyDE/sub는 dense에 맡김) ===
+    bm25_queries: list[tuple[str, str]] = [("original_bm25", question)]
+    if analysis["id_keywords"]:
+        bm25_queries.append(("id_keywords_bm25", " ".join(analysis["id_keywords"])))
+    bm25_used = False
+    bm25_top_n = fetch_per * BM25_FETCH_MULTIPLIER
+    for label, qtext in bm25_queries:
+        try:
+            hits = bm25_search_global(qtext, top_n=bm25_top_n)
+        except Exception as exc:
+            logger.warning("BM25 검색 실패 (%s): %s", label, exc)
+            continue
+        if hits:
+            bm25_used = True
+        for cid, text, meta, col_name, rank in hits:
+            # 사용자가 카테고리를 한정했다면 그 컬렉션만 통과시킴
+            if col_name not in col_names_filter:
+                continue
+            col_weight = HIERARCHY_WEIGHTS.get(col_name, DEFAULT_HIERARCHY_WEIGHT)
+            if auto_categories and col_name in auto_categories:
+                col_weight *= 0.92
+            rrf_scores[cid] = rrf_scores.get(cid, 0.0) + (1.0 / (RRF_K + rank + 1)) / col_weight
+            if cid not in candidates:
+                try:
+                    page_num = int((meta or {}).get("page", 99) or 99)
+                except (ValueError, TypeError):
+                    page_num = 99
+                page_pen = EARLY_PAGE_PENALTY if page_num <= EARLY_PAGE_THRESHOLD else 1.0
+                candidates[cid] = {
+                    "id": cid,
+                    "text": text,
+                    "metadata": meta,
+                    "dist": None,
+                    "eff_dist": col_weight * page_pen,
+                    "source_query": label,
+                    "collection": col_name,
+                }
+
+    # RRF score 부여 후 내림차순 정렬
+    for cid, c in candidates.items():
+        c["rrf_score"] = rrf_scores.get(cid, 0.0)
+    ranked = sorted(candidates.values(), key=lambda c: -c["rrf_score"])
+
+    # Hierarchical filter — 일부 intent에서 top-N source로 한정
+    ranked, hier_info = _hierarchical_filter(ranked, intent)
+
+    # MMR — 같은 source/Pasal 중복 다양화
+    cand_list = _mmr_select(ranked, target_size=strat["rerank_pool"], lambda_=MMR_LAMBDA)
+
     debug = {
         "analysis": {
             "intent": intent,
@@ -434,9 +819,13 @@ def multi_query_retrieve(
         },
         "strategy": strat,
         "num_queries": len(queries),
+        "num_bm25_queries": len(bm25_queries),
+        "bm25_used": bm25_used,
         "candidates_unique": len(candidates),
         "candidates_topN": len(cand_list),
         "auto_categories": auto_categories,
+        "mmr_lambda": MMR_LAMBDA,
+        "hierarchical": hier_info,
     }
     return cand_list, debug, analysis
 
@@ -445,9 +834,10 @@ def multi_query_retrieve(
 
 # ===== Phase 6: Agentic Tool Use =====
 # Claude가 답변 도중 추가 정보가 필요하면 직접 도구를 호출.
-# 두 가지 핵심 도구:
+# 세 가지 핵심 도구:
 #   1) search_collection — 특정 카테고리에서 추가 검색
 #   2) fetch_article_chunks — 특정 PDF + 조항 직접 조회
+#   3) fetch_cross_reference — 본문 인용 문구 자동 파싱 → 해당 법령 조항 조회
 
 TOOLS = [
     {
@@ -491,6 +881,26 @@ TOOLS = [
                 },
             },
             "required": ["source_file"],
+        },
+    },
+    {
+        "name": "fetch_cross_reference",
+        "description": (
+            "본문 내 참조 문구를 자동 파싱해 해당 법령의 조항 청크를 가져옴. "
+            "예: 'Pasal 5 ayat (2) UU Nomor 11 Tahun 2020', 'PP 5/2021 Pasal 7'. "
+            "법령 종류·번호·연도·조항을 정규식으로 추출 → 카테고리 매핑 → 매칭 PDF 검색 → "
+            "fetch_article_chunks 호출. 파일명을 모를 때 cross-citation 따라가는 용도. "
+            "파싱/매칭 실패 시 search_collection으로 fallback."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "reference": {
+                    "type": "string",
+                    "description": "원문 그대로의 참조 문구. 예: 'Pasal 5 ayat (2) UU Nomor 11 Tahun 2020'.",
+                },
+            },
+            "required": ["reference"],
         },
         # Phase 8: 마지막 tool에 cache_control 추가 → system + tools 합쳐 ~2400 tokens cache.
         # system 단독(1764)으로는 cache 안 되는데 tools 합치면 작동. 호출당 입력 비용 ~90% ↓.
@@ -678,6 +1088,145 @@ def tool_fetch_article_chunks(source_file: str, pasal: str | None = None) -> dic
     }
 
 
+_CROSSREF_TYPE_RE = re.compile(
+    r"\b(UUD|UUDS|UURIS|UU|PP|Perpres|Permen[a-zA-Z]*|Kepmen[a-zA-Z]*|Perda|Inpres|Konstitusi)\b",
+    re.IGNORECASE,
+)
+_CROSSREF_NUMYEAR_RE = re.compile(
+    r"(?:No\.?\s*|Nomor\s+)?(\d+)\s*(?:Tahun\s+|/|-)\s*(\d{4})",
+    re.IGNORECASE,
+)
+_CROSSREF_PASAL_RE = re.compile(
+    r"Pasal\s+(\d+[A-Za-z]?)",
+    re.IGNORECASE,
+)
+
+
+def _crossref_type_to_category(ltype: str) -> str | None:
+    t = (ltype or "").lower()
+    if t in ("uud", "uuds", "uuris", "konstitusi"):
+        return "constitution"
+    if t == "uu":
+        return "uu"
+    if t == "pp":
+        return "pp"
+    if t == "perpres":
+        return "perpres"
+    if t.startswith("permen"):
+        return "permen"
+    if t.startswith("kepmen"):
+        return "kepmen"
+    if t == "perda":
+        return "perda"
+    if t == "inpres":
+        return "lainnya"
+    return None
+
+
+def _list_unique_sources(col) -> list[str]:
+    """컬렉션의 unique source 목록. BM25 인덱스가 있으면 거기서, 없으면 col.get."""
+    idx = _bm25_state.get("global")
+    if idx and idx.get("collections"):
+        seen: set[str] = set()
+        for cn, m in zip(idx["collections"], idx["metas"]):
+            if cn != col.name:
+                continue
+            s = (m or {}).get("source")
+            if s:
+                seen.add(s)
+        if seen:
+            return sorted(seen)
+    try:
+        r = col.get(include=["metadatas"])
+    except Exception:
+        return []
+    seen2: set[str] = set()
+    for m in (r.get("metadatas") or []):
+        s = (m or {}).get("source")
+        if s:
+            seen2.add(s)
+    return sorted(seen2)
+
+
+def tool_fetch_cross_reference(reference: str) -> dict:
+    """본문 참조 문구 → 파싱 → 매칭 PDF → fetch_article_chunks."""
+    ref = (reference or "").strip()
+    if not ref:
+        return {"error": "empty reference", "reference": ref, "results": []}
+    type_m = _CROSSREF_TYPE_RE.search(ref)
+    num_m = _CROSSREF_NUMYEAR_RE.search(ref)
+    pasal_m = _CROSSREF_PASAL_RE.search(ref)
+    if not type_m:
+        return {"error": "parse failed: 법령 종류 인식 불가", "reference": ref, "results": []}
+    ltype = type_m.group(1)
+    cat = _crossref_type_to_category(ltype)
+    if not cat:
+        return {"error": f"unknown law type: {ltype}", "reference": ref, "results": []}
+    is_constitution = cat == "constitution"
+    # UUD/UUDS/Konstitusi는 Nomor 없이 연도만 있는 경우 허용. 그 외는 Nomor+연도 필수.
+    if not is_constitution and not num_m:
+        return {
+            "error": "parse failed: 법령 번호·연도 인식 불가",
+            "reference": ref,
+            "results": [],
+        }
+    num = num_m.group(1) if num_m else None
+    year = num_m.group(2) if num_m else None
+    if is_constitution and year is None:
+        ym = re.search(r"\b(19\d{2}|20\d{2})\b", ref)
+        if ym:
+            year = ym.group(1)
+    pasal = f"Pasal {pasal_m.group(1)}" if pasal_m else None
+    col_name = COLLECTION_PREFIX + cat
+    client = get_chroma()
+    try:
+        col = client.get_collection(col_name)
+    except Exception as exc:
+        return {"error": f"collection not found: {exc}", "reference": ref, "results": []}
+    sources = _list_unique_sources(col)
+    if not sources:
+        return {"error": "collection empty", "reference": ref, "results": []}
+
+    type_token = re.escape(ltype)
+    matched: list[str] = []
+    if is_constitution:
+        # UUD_1945.pdf, UUD_NRI_Tahun_1945.pdf 등 다양한 파일명을 허용.
+        if year:
+            uud_re = re.compile(rf"UUD.*{re.escape(year)}", re.IGNORECASE)
+            matched = [s for s in sources if uud_re.search(s)]
+        if not matched:
+            matched = [s for s in sources if re.search(r"^UUD", s, re.IGNORECASE)]
+    else:
+        # {TYPE}_{NUM}_Tahun_{YEAR}_* (가장 흔한 파일명 규약)
+        match_re = re.compile(
+            rf"^{type_token}_0*{re.escape(num)}_Tahun_{re.escape(year)}",
+            re.IGNORECASE,
+        )
+        matched = [s for s in sources if match_re.search(s)]
+        if not matched:
+            # 느슨한 fallback: _{NUM}_Tahun_{YEAR}_ 어디든
+            alt_re = re.compile(
+                rf"_0*{re.escape(num)}_Tahun_{re.escape(year)}",
+                re.IGNORECASE,
+            )
+            matched = [s for s in sources if alt_re.search(s)]
+
+    if not matched:
+        return {
+            "error": "matching source pdf not found",
+            "reference": ref,
+            "parsed": {"type": ltype, "num": num, "year": year, "pasal": pasal, "category": cat},
+            "candidate_sources": len(sources),
+            "results": [],
+        }
+    src = matched[0]
+    result = tool_fetch_article_chunks(source_file=src, pasal=pasal)
+    result["reference"] = ref
+    result["matched_source"] = src
+    result["parsed"] = {"type": ltype, "num": num, "year": year, "pasal": pasal, "category": cat}
+    return result
+
+
 def execute_tool(name: str, inp: dict) -> dict:
     try:
         if name == "search_collection":
@@ -691,6 +1240,8 @@ def execute_tool(name: str, inp: dict) -> dict:
                 source_file=inp.get("source_file", ""),
                 pasal=inp.get("pasal"),
             )
+        elif name == "fetch_cross_reference":
+            return tool_fetch_cross_reference(reference=inp.get("reference", ""))
         else:
             return {"error": f"unknown tool: {name}"}
     except Exception as exc:
@@ -775,6 +1326,127 @@ def critique_answer(question: str, context: str, answer: str) -> dict:
     except Exception as exc:
         logger.warning("critique 실패: %s", exc)
         return {**default, "summary": f"검증 호출 실패: {type(exc).__name__}"}
+
+
+# ===== Phase 11: Adversarial critique (다른 모델군 cross-check) =====
+# Haiku self-critique 결과가 low/medium+issues면 Sonnet으로 한 번 더 검증.
+# 같은 모델군 self-critique가 놓치는 환각·인용 오류를 적발.
+
+ADVERSARIAL_CRITIQUE_PROMPT = """당신은 인도네시아 법령 답변의 **adversarial reviewer**입니다.
+다른 검수자(Haiku)가 이미 1차 검증을 했고, 그 결과를 아래에 첨부합니다. 당신의 역할은 1차 검증이 **놓쳤을 가능성**을 찾는 것 — 같은 모델군의 self-critique는 비슷한 종류의 오류를 함께 놓치는 경향이 있습니다.
+
+[질문]
+{question}
+
+[참고 문서]
+{context}
+
+[모델 답변]
+{answer}
+
+[1차 검증 결과 — Haiku]
+- confidence: {initial_confidence}
+- summary: {initial_summary}
+- issues: {initial_issues}
+
+검증 항목 (1차 결과를 의심하며):
+
+1. **놓친 hallucination**: 1차에서 verified로 분류됐지만 사실 [참고 문서]에 근거가 약하거나 외삽된 부분.
+2. **subtle bad_citation**: 인용 형식은 맞지만 실제로는 다른 조항/페이지를 가리키는 경우. ayat 번호 미스매치, 같은 PDF의 인접 조항 혼동.
+3. **missing**: 답변이 핵심 조항·예외·반대 사례를 누락. 특히 위계 충돌 시 상위법 명시 누락.
+4. **logical_gap**: 인용은 정확하나 결론이 인용에서 직접 도출되지 않는 비약.
+5. **confidence 재평가**: high/medium/low 중 어디로 조정해야 하는지.
+
+반드시 JSON으로만:
+{{
+  "confidence": "high|medium|low",
+  "additional_issues": [
+    {{"type": "hallucination|bad_citation|missing|logical_gap", "description": "..."}}
+  ],
+  "summary": "한국어 한 줄 — 1차 결과와 비교한 종합 평가"
+}}
+
+1차 검증이 충분히 엄밀했고 추가 발견이 없으면 additional_issues는 빈 배열, confidence는 1차와 같게.
+"""
+
+
+def _critique_needs_adversarial(critique: dict, verifier: dict | None) -> bool:
+    """Adversarial critique를 켤지 판단. 비용 통제 위해 의심스러운 답변에만."""
+    if not ADV_CRITIQUE_ENABLED:
+        return False
+    conf = (critique or {}).get("confidence", "")
+    issues = (critique or {}).get("issues", []) or []
+    if conf == "low":
+        return True
+    if conf == "medium" and len(issues) >= 1:
+        return True
+    # verifier가 의심 인용을 표시했으면 high여도 한 번 더.
+    if verifier and (verifier.get("unverified") or 0) > 0:
+        return True
+    return False
+
+
+def adversarial_critique(question: str, context: str, answer: str, initial: dict) -> dict:
+    """Sonnet으로 1차 critique를 challenge. 실패 시 빈 결과 반환 (호출자가 merge skip)."""
+    empty = {"confidence": initial.get("confidence", "unknown"), "additional_issues": [], "summary": ""}
+    if not answer.strip():
+        return empty
+    client = get_anthropic()
+    try:
+        ctx = context[:30000] + ("…[truncated]" if len(context) > 30000 else "")
+        ans = answer[:8000]
+        resp = client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=1500,
+            messages=[{"role": "user", "content": ADVERSARIAL_CRITIQUE_PROMPT.format(
+                question=question,
+                context=ctx,
+                answer=ans,
+                initial_confidence=initial.get("confidence", "unknown"),
+                initial_summary=initial.get("summary", ""),
+                initial_issues=json.dumps(initial.get("issues", []), ensure_ascii=False)[:2000],
+            )}],
+        )
+        text = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text")
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        if not m:
+            return empty
+        data = json.loads(m.group(0))
+        return {
+            "confidence": data.get("confidence", initial.get("confidence", "unknown")),
+            "additional_issues": data.get("additional_issues", []) or [],
+            "summary": str(data.get("summary", ""))[:400],
+        }
+    except Exception as exc:
+        logger.warning("adversarial critique 실패: %s", exc)
+        return empty
+
+
+def _merge_critiques(initial: dict, adv: dict) -> dict:
+    """1차 + adversarial critique 병합. confidence는 더 낮은 쪽 우선, issues는 합집합."""
+    if not adv or (not adv.get("additional_issues") and adv.get("confidence") == initial.get("confidence")):
+        return {**initial, "adversarial": {"applied": True, "additional_issues_count": 0, "summary": adv.get("summary", "") if adv else ""}}
+    # confidence downgrade rank
+    rank = {"high": 3, "medium": 2, "low": 1, "unknown": 0}
+    init_r = rank.get(initial.get("confidence", "unknown"), 0)
+    adv_r = rank.get(adv.get("confidence", "unknown"), 0)
+    final_conf = initial.get("confidence") if init_r and init_r <= adv_r else adv.get("confidence", initial.get("confidence"))
+    add_issues = adv.get("additional_issues", []) or []
+    merged_issues = list(initial.get("issues", []) or [])
+    for ai in add_issues:
+        if isinstance(ai, dict):
+            merged_issues.append({**ai, "source": "adversarial"})
+    return {
+        **initial,
+        "confidence": final_conf,
+        "issues": merged_issues,
+        "adversarial": {
+            "applied": True,
+            "additional_issues_count": len(add_issues),
+            "summary": adv.get("summary", ""),
+            "confidence_proposed": adv.get("confidence", initial.get("confidence")),
+        },
+    }
 
 
 # ===== Phase 5b: critique-driven retry + deterministic citation verifier =====
@@ -995,10 +1667,15 @@ DIVERSITY_PENALTY_MIN = 0.55
 
 
 def rerank_with_claude(question: str, candidates: list[dict], top_k: int, intent: str = "general") -> list[dict]:
-    """Phase 4: Claude Haiku로 candidates reranking + reasoning + diversity penalty.
+    """Phase 4 + Phase 11: 선택적 cross-encoder 1차 컷 → Claude Haiku 2차 reranking + reasoning.
 
     각 candidate에 'llm_score', 'llm_reason'을 추가. caller가 답변 단계에서 reasoning을 활용.
+    cross-encoder가 활성화되어 있으면 Haiku 호출 전에 후보를 CROSS_ENCODER_CUT개로 줄여 비용·지연을 절감.
     """
+    # Phase 11: cross-encoder 1차 컷 — 큰 pool을 신속하게 솎아냄.
+    if CROSS_ENCODER_ENABLED and len(candidates) > CROSS_ENCODER_CUT:
+        candidates = cross_encoder_score(question, candidates, cut_to=max(CROSS_ENCODER_CUT, top_k))
+
     if len(candidates) <= top_k:
         # 그래도 reasoning 없이 그대로 반환
         for c in candidates:
@@ -1205,6 +1882,16 @@ def _warmup_sync() -> None:
         _state["readiness_error"] = None
         _state["warmup_finished_ts"] = time.time()
         logger.info("v2 warmup 완료 (%.1fs)", time.perf_counter() - started)
+        # BM25 인덱스는 ready=True 이후 백그라운드로 마저 채움.
+        # 디스크 캐시가 살아있으면 수 초, 처음이면 ~30s. 빌드 중에는 dense-only로 응답.
+        try:
+            idx = get_bm25_global()
+            if idx:
+                logger.info("BM25 글로벌 인덱스 준비 완료 (n=%d)", idx.get("count", 0))
+            else:
+                logger.warning("BM25 인덱스 준비 실패 — dense-only fallback")
+        except Exception:
+            logger.exception("BM25 warmup 실패 — dense-only fallback")
     except Exception as exc:
         _state["ready"] = False
         _state["readiness_error"] = f"{type(exc).__name__}: {exc}"
@@ -1272,6 +1959,12 @@ def health(quick: int = 0) -> dict[str, Any]:
         per = {c.name: c.count() for c in cols}
         info["collections"] = per
         info["collection_count"] = sum(per.values())
+        # 컬렉션별 고유 법령(=source PDF) 수. ingest manifest 기반 — chroma
+        # col.get() 전체 metadata fetch는 큰 컬렉션에서 timeout이 잦아 폐기.
+        manifest_counts = _load_doc_counts_from_manifest()
+        per_docs: dict[str, int] = {c.name: int(manifest_counts.get(c.name, 0)) for c in cols}
+        info["collection_docs"] = per_docs
+        info["doc_count"] = sum(per_docs.values())
     except Exception as exc:
         info["ok"] = False
         info["error"] = str(exc)
@@ -1352,6 +2045,10 @@ def query(req: QueryRequest, x_api_token: str | None = Header(default=None)) -> 
     t3 = time.time()
     critique = critique_answer(req.question, context, answer)
     verifier = verify_citations(answer, top)
+    # Phase 11: 의심스러운 답변에 한해 Sonnet adversarial critique 추가
+    if _critique_needs_adversarial(critique, verifier):
+        adv = adversarial_critique(req.question, context, answer, critique)
+        critique = _merge_critiques(critique, adv)
     t_critique = time.time() - t3
 
     # Phase 5b: critique/verifier-driven retry.
@@ -1383,6 +2080,9 @@ def query(req: QueryRequest, x_api_token: str | None = Header(default=None)) -> 
                 # 재검증
                 critique = critique_answer(req.question, context, answer)
                 verifier = verify_citations(answer, top)
+                if _critique_needs_adversarial(critique, verifier):
+                    adv = adversarial_critique(req.question, context, answer, critique)
+                    critique = _merge_critiques(critique, adv)
         except Exception as exc:
             logger.warning("retry generation 실패: %s", exc)
         t_retry = time.time() - t_retry_start
@@ -1522,11 +2222,10 @@ def query_stream(req: QueryRequest, x_api_token: str | None = Header(default=Non
                 iter_count = iter_n + 1
                 with client.messages.stream(
                     model=CLAUDE_MODEL,
-                    max_tokens=MAX_ANSWER_TOKENS,
-                    thinking={"type": "enabled", "budget_tokens": THINKING_BUDGET_TOKENS},
                     system=SYSTEM_PROMPT_CACHED,
                     messages=messages_loop,
                     tools=TOOLS,
+                    **_agent_loop_kwargs(),
                 ) as stream:
                     cur_block_type = None
                     for event in stream:
@@ -1609,6 +2308,9 @@ def query_stream(req: QueryRequest, x_api_token: str | None = Header(default=Non
         t3 = time.time()
         critique = critique_answer(req.question, context, answer_full)
         verifier = verify_citations(answer_full, top)
+        if _critique_needs_adversarial(critique, verifier):
+            adv = adversarial_critique(req.question, context, answer_full, critique)
+            critique = _merge_critiques(critique, adv)
         t_critique = time.time() - t3
         yield _sse("critique", critique)
         yield _sse("verifier", verifier)
@@ -1637,11 +2339,10 @@ def query_stream(req: QueryRequest, x_api_token: str | None = Header(default=Non
                     iter_count_retry = iter_n + 1
                     with client.messages.stream(
                         model=CLAUDE_MODEL,
-                        max_tokens=MAX_ANSWER_TOKENS,
-                        thinking={"type": "enabled", "budget_tokens": THINKING_BUDGET_TOKENS},
                         system=SYSTEM_PROMPT_CACHED,
                         messages=messages_retry,
                         tools=TOOLS,
+                        **_agent_loop_kwargs(),
                     ) as rstream:
                         for event in rstream:
                             et = getattr(event, "type", "")
@@ -1698,6 +2399,9 @@ def query_stream(req: QueryRequest, x_api_token: str | None = Header(default=Non
                     # 재검증
                     critique = critique_answer(req.question, context, answer_full)
                     verifier = verify_citations(answer_full, top)
+                    if _critique_needs_adversarial(critique, verifier):
+                        adv = adversarial_critique(req.question, context, answer_full, critique)
+                        critique = _merge_critiques(critique, adv)
                     yield _sse("critique", critique)
                     yield _sse("verifier", verifier)
             except Exception as exc:

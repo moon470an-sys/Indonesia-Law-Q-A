@@ -52,6 +52,35 @@ sys.path.insert(0, str(ROOT))
 import rag_server_v2 as rag  # noqa: E402
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 
+# === Spawn-time warmup ===
+# MCP는 uvicorn FastAPI lifecycle을 거치지 않아 rag_server_v2의 _warmup_sync()가
+# 자동 호출되지 않는다. 결과: 첫 search() 호출 시 BGE-M3 모델 ~30s 로드 동안
+# MCP 클라이언트(Claude Code/Desktop) 타임아웃 → "Request timed out".
+# fetch_article / list_categories는 모델이 필요 없어 영향 없음.
+#
+# 여기서 spawn 시점에 동기 warmup을 강제 호출해 BGE-M3 + ChromaDB peek + BM25
+# 인덱스를 미리 올려둔다. spawn이 ~30~45s 지연되지만 그 뒤 search는 즉시 응답.
+#
+# 라이브 RAG (uvicorn @ rag_server_v2:app)와의 격리:
+#   - 별도 프로세스 → 모듈 state(_state dict), 모델 인스턴스 완전 분리.
+#   - 공유 자원은 (a) ChromaDB 데몬 127.0.0.1:8001 — read-only 쿼리,
+#                  (b) D:\hf_cache 모델 파일 — read-only mmap,
+#                  (c) D:\rag_data\bm25 인덱스 파일 — read-only.
+#   - 라이브 응답에 영향 없음.
+print("[MCP] warming up BGE-M3 + ChromaDB + BM25 ...", file=sys.stderr, flush=True)
+try:
+    rag._warmup_sync()
+    print("[MCP] warmup done.", file=sys.stderr, flush=True)
+except Exception as _warmup_exc:  # noqa: BLE001
+    # warmup 실패해도 list_categories / fetch_article 은 동작하므로 서버는 띄운다.
+    # 사용자는 search 첫 호출에서 다시 ~30s 대기 + 가능 시 같은 실패를 보게 됨.
+    print(
+        f"[MCP] warmup failed (server still up; search may timeout on first call): "
+        f"{type(_warmup_exc).__name__}: {_warmup_exc}",
+        file=sys.stderr,
+        flush=True,
+    )
+
 mcp = FastMCP("indonesia-law-rag")
 
 

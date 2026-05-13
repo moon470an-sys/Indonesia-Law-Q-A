@@ -33,7 +33,7 @@ os.environ.setdefault("TRANSFORMERS_CACHE", str(_DEFAULT_CACHE / "transformers")
 os.environ.setdefault("SENTENCE_TRANSFORMERS_HOME", str(_DEFAULT_CACHE / "sentence_transformers"))
 os.environ.setdefault("TORCH_HOME", str(_DEFAULT_CACHE / "torch"))
 
-from anthropic import Anthropic
+from anthropic import Anthropic, RateLimitError
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -58,7 +58,10 @@ EMBEDDING_DIM = 1024
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
 CLAUDE_HAIKU = os.getenv("CLAUDE_HAIKU", "claude-haiku-4-5-20251001")
 
-TOP_K_DEFAULT = 15
+TOP_K_DEFAULT = 8
+# 메인 답변용 user_message에 인라인되는 청크 본문 길이 cap.
+# 청크 전문이 필요하면 모델이 fetch_article_chunks로 끌어옴 → 매 호출 입력 토큰 절감.
+CONTEXT_CHUNK_TEXT_MAX = 1500
 FETCH_PER_QUERY = 30        # 각 query embedding당 가져올 후보 수
 RERANK_POOL_SIZE = 50       # reranker에 보낼 후보 수
 MAX_ANSWER_TOKENS = 8192    # 비-interleaved 경로의 thinking+답변 합. thinking 2000 + 답변 ~6000.
@@ -324,7 +327,10 @@ def get_anthropic() -> Anthropic:
     if _state["anthropic"] is None:
         if not ANTHROPIC_API_KEY:
             raise RuntimeError("ANTHROPIC_API_KEY 없음")
-        _state["anthropic"] = Anthropic(api_key=ANTHROPIC_API_KEY)
+        # max_retries 4: SDK가 429/503에 대해 exponential backoff (0.5→1→2→4s)로
+        # 자동 재시도. Tier 1의 30k ITPM에서 일시적 burst가 1~2초 안에 풀리는 경우
+        # 클라이언트는 알아채지 못하고 정상 응답을 받게 됨.
+        _state["anthropic"] = Anthropic(api_key=ANTHROPIC_API_KEY, max_retries=4)
     return _state["anthropic"]
 
 
@@ -908,7 +914,7 @@ TOOLS = [
     },
 ]
 
-MAX_TOOL_ITERATIONS = 5
+MAX_TOOL_ITERATIONS = 3
 
 # ===== Phase 7: Conversational Memory =====
 # In-memory conversation store. server restart 시 history 소실 (단순화).
@@ -2005,6 +2011,8 @@ def query(req: QueryRequest, x_api_token: str | None = Header(default=None)) -> 
         page = m.get("page", "?")
         cat = m.get("category") or ""
         cleaned_text = clean_chunk(c["text"])
+        if len(cleaned_text) > CONTEXT_CHUNK_TEXT_MAX:
+            cleaned_text = cleaned_text[:CONTEXT_CHUNK_TEXT_MAX] + "…"
         reason = c.get("llm_reason", "")
         reason_line = f", 관련성: {reason}" if reason else ""
         blocks.append(f"[참고문서 {i}] (출처: {source}, p.{page}, {article}, {cat}{reason_line})\n{cleaned_text}")
@@ -2191,6 +2199,8 @@ def query_stream(req: QueryRequest, x_api_token: str | None = Header(default=Non
             page = m.get("page", "?")
             cat = m.get("category") or ""
             cleaned_text = clean_chunk(c["text"])
+            if len(cleaned_text) > CONTEXT_CHUNK_TEXT_MAX:
+                cleaned_text = cleaned_text[:CONTEXT_CHUNK_TEXT_MAX] + "…"
             reason = c.get("llm_reason", "")
             reason_line = f", 관련성: {reason}" if reason else ""
             blocks.append(f"[참고문서 {i}] (출처: {source}, p.{page}, {article}, {cat}{reason_line})\n{cleaned_text}")
@@ -2293,6 +2303,19 @@ def query_stream(req: QueryRequest, x_api_token: str | None = Header(default=Non
                 messages_loop.append({"role": "user", "content": tool_results_payload})
                 # 다음 turn에서 thinking_announced 초기화 — 새 thinking 알림 가능
                 thinking_announced = False
+        except RateLimitError as exc:
+            # SDK 자동 재시도(max_retries=4)도 못 뚫은 ITPM 한도. 사용자에게 명확히 안내.
+            retry_after = None
+            try:
+                retry_after = exc.response.headers.get("retry-after")
+            except Exception:
+                pass
+            logger.warning("agent streaming rate_limited (retry-after=%s)", retry_after)
+            yield _sse("rate_limited", {
+                "message": "Anthropic API 분당 토큰 한도 초과. 잠시 후 다시 시도해 주세요.",
+                "retry_after_sec": retry_after,
+            })
+            return
         except Exception as exc:
             logger.exception("agent streaming 실패")
             yield _sse("error", {"message": f"{type(exc).__name__}: {exc}"})
@@ -2404,6 +2427,19 @@ def query_stream(req: QueryRequest, x_api_token: str | None = Header(default=Non
                         critique = _merge_critiques(critique, adv)
                     yield _sse("critique", critique)
                     yield _sse("verifier", verifier)
+            except RateLimitError as exc:
+                # retry 단계 rate limit — 1차 답변은 이미 있으므로 retry 포기하고 1차 답변 유지.
+                retry_after = None
+                try:
+                    retry_after = exc.response.headers.get("retry-after")
+                except Exception:
+                    pass
+                logger.warning("stream retry rate_limited (retry-after=%s), keeping initial answer", retry_after)
+                yield _sse("rate_limited", {
+                    "message": "재시도 단계에서 API 한도 초과 — 1차 답변을 유지합니다.",
+                    "retry_after_sec": retry_after,
+                    "phase": "retry",
+                })
             except Exception as exc:
                 logger.warning("stream retry 실패: %s", exc)
                 yield _sse("error", {"message": f"retry 중 오류: {type(exc).__name__}: {exc}"})

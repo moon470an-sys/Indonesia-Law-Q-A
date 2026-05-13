@@ -50,26 +50,26 @@ const els = {
   corpusSort: document.getElementById("corpusSort"),
 };
 
-// indonesia_* 컬렉션명 → 한국어 표시명 + 약어 매핑.
+// v2_indonesia_* 컬렉션명 → 한국어 표시명 + 약어 매핑.
 const COLLECTION_META = {
-  indonesia_constitution: { ko: "헌법", abbr: "UUD" },
-  indonesia_uu:           { ko: "법률", abbr: "UU" },
-  indonesia_pp:           { ko: "정부령", abbr: "PP" },
-  indonesia_perpres:      { ko: "대통령령", abbr: "Perpres" },
-  indonesia_permen:       { ko: "장관령", abbr: "Permen" },
-  indonesia_kepmen:       { ko: "장관결정", abbr: "Kepmen" },
-  indonesia_perda:        { ko: "지방조례", abbr: "Perda" },
-  indonesia_lainnya:      { ko: "기타", abbr: "Lainnya" },
+  v2_indonesia_constitution: { ko: "헌법", abbr: "UUD" },
+  v2_indonesia_uu:           { ko: "법률", abbr: "UU" },
+  v2_indonesia_pp:           { ko: "정부령", abbr: "PP" },
+  v2_indonesia_perpres:      { ko: "대통령령", abbr: "Perpres" },
+  v2_indonesia_permen:       { ko: "장관령", abbr: "Permen" },
+  v2_indonesia_kepmen:       { ko: "장관결정", abbr: "Kepmen" },
+  v2_indonesia_perda:        { ko: "지방조례", abbr: "Perda" },
+  v2_indonesia_lainnya:      { ko: "기타", abbr: "Lainnya" },
 };
 const COLLECTION_ORDER = [
-  "indonesia_constitution",
-  "indonesia_uu",
-  "indonesia_pp",
-  "indonesia_perpres",
-  "indonesia_permen",
-  "indonesia_kepmen",
-  "indonesia_perda",
-  "indonesia_lainnya",
+  "v2_indonesia_constitution",
+  "v2_indonesia_uu",
+  "v2_indonesia_pp",
+  "v2_indonesia_perpres",
+  "v2_indonesia_permen",
+  "v2_indonesia_kepmen",
+  "v2_indonesia_perda",
+  "v2_indonesia_lainnya",
 ];
 
 const selectedCategories = new Set(); // 사용자가 클릭으로 선택한 컬렉션명들
@@ -77,31 +77,31 @@ const selectedCategories = new Set(); // 사용자가 클릭으로 선택한 컬
 // 카테고리별 큐레이션 예시 질문. cats가 비어있으면 항상 표시 (전체).
 const EXAMPLE_QUESTIONS = [
   // 헌법
-  { label: "대통령의 권한", q: "인도네시아 헌법에서 대통령의 권한은 무엇인가?", cats: ["indonesia_constitution"] },
-  { label: "국민 기본권", q: "인도네시아 헌법상 국민의 기본권은 어떻게 규정되어 있는가?", cats: ["indonesia_constitution"] },
-  { label: "의회 구성 (MPR/DPR/DPD)", q: "인도네시아 의회(MPR, DPR, DPD)의 구성과 역할은?", cats: ["indonesia_constitution"] },
-  { label: "헌법 개정 절차", q: "인도네시아 헌법 개정 절차는 어떻게 되는가?", cats: ["indonesia_constitution"] },
+  { label: "대통령의 권한", q: "인도네시아 헌법에서 대통령의 권한은 무엇인가?", cats: ["v2_indonesia_constitution"] },
+  { label: "국민 기본권", q: "인도네시아 헌법상 국민의 기본권은 어떻게 규정되어 있는가?", cats: ["v2_indonesia_constitution"] },
+  { label: "의회 구성 (MPR/DPR/DPD)", q: "인도네시아 의회(MPR, DPR, DPD)의 구성과 역할은?", cats: ["v2_indonesia_constitution"] },
+  { label: "헌법 개정 절차", q: "인도네시아 헌법 개정 절차는 어떻게 되는가?", cats: ["v2_indonesia_constitution"] },
   // 법률 UU
-  { label: "노동법 주요 내용", q: "인도네시아 노동법(UU 13/2003)의 주요 내용은?", cats: ["indonesia_uu"] },
-  { label: "PT 회사 설립 요건", q: "회사법상 유한책임회사(PT) 설립 요건과 절차는?", cats: ["indonesia_uu"] },
-  { label: "외국인투자법", q: "외국인투자법(UU Penanaman Modal)의 주요 규정은?", cats: ["indonesia_uu"] },
-  { label: "조세 일반규정", q: "조세일반규정법(KUP)에서 납세자의 권리와 의무는?", cats: ["indonesia_uu"] },
+  { label: "노동법 주요 내용", q: "인도네시아 노동법(UU 13/2003)의 주요 내용은?", cats: ["v2_indonesia_uu"] },
+  { label: "PT 회사 설립 요건", q: "회사법상 유한책임회사(PT) 설립 요건과 절차는?", cats: ["v2_indonesia_uu"] },
+  { label: "외국인투자법", q: "외국인투자법(UU Penanaman Modal)의 주요 규정은?", cats: ["v2_indonesia_uu"] },
+  { label: "조세 일반규정", q: "조세일반규정법(KUP)에서 납세자의 권리와 의무는?", cats: ["v2_indonesia_uu"] },
   // 정부령 PP
-  { label: "환경영향평가(AMDAL)", q: "환경영향평가(AMDAL)의 절차와 대상 사업은?", cats: ["indonesia_pp"] },
-  { label: "토지수용 절차", q: "공익을 위한 토지수용 절차에 관한 정부령은 무엇이 있는가?", cats: ["indonesia_pp"] },
+  { label: "환경영향평가(AMDAL)", q: "환경영향평가(AMDAL)의 절차와 대상 사업은?", cats: ["v2_indonesia_pp"] },
+  { label: "토지수용 절차", q: "공익을 위한 토지수용 절차에 관한 정부령은 무엇이 있는가?", cats: ["v2_indonesia_pp"] },
   // 대통령령 Perpres
-  { label: "외국인근로자 채용", q: "외국인근로자(TKA) 채용에 관한 대통령령의 주요 내용은?", cats: ["indonesia_perpres"] },
-  { label: "부동산 외국인 소유", q: "외국인의 부동산 소유에 관한 대통령령은?", cats: ["indonesia_perpres"] },
+  { label: "외국인근로자 채용", q: "외국인근로자(TKA) 채용에 관한 대통령령의 주요 내용은?", cats: ["v2_indonesia_perpres"] },
+  { label: "부동산 외국인 소유", q: "외국인의 부동산 소유에 관한 대통령령은?", cats: ["v2_indonesia_perpres"] },
   // 장관령 Permen
-  { label: "산업안전보건", q: "산업안전보건 관련 노동부 장관령의 주요 규정은?", cats: ["indonesia_permen"] },
-  { label: "수입 라이선스(API)", q: "수입업자 식별번호(API) 발급 요건은?", cats: ["indonesia_permen"] },
-  { label: "할랄 인증 절차", q: "할랄 인증 의무 대상 품목과 인증 절차는?", cats: ["indonesia_permen"] },
+  { label: "산업안전보건", q: "산업안전보건 관련 노동부 장관령의 주요 규정은?", cats: ["v2_indonesia_permen"] },
+  { label: "수입 라이선스(API)", q: "수입업자 식별번호(API) 발급 요건은?", cats: ["v2_indonesia_permen"] },
+  { label: "할랄 인증 절차", q: "할랄 인증 의무 대상 품목과 인증 절차는?", cats: ["v2_indonesia_permen"] },
   // 장관결정 Kepmen
-  { label: "최저임금 결정", q: "주별 최저임금(UMP) 결정 절차와 기준은?", cats: ["indonesia_kepmen"] },
+  { label: "최저임금 결정", q: "주별 최저임금(UMP) 결정 절차와 기준은?", cats: ["v2_indonesia_kepmen"] },
   // 지방조례 Perda
-  { label: "사업 인허가 (자카르타)", q: "자카르타 특별주에서 사업 인허가 관련 조례는?", cats: ["indonesia_perda"] },
+  { label: "사업 인허가 (자카르타)", q: "자카르타 특별주에서 사업 인허가 관련 조례는?", cats: ["v2_indonesia_perda"] },
   // 기타
-  { label: "대통령훈령 효력", q: "대통령훈령(Inpres)의 법적 효력과 위계는?", cats: ["indonesia_lainnya"] },
+  { label: "대통령훈령 효력", q: "대통령훈령(Inpres)의 법적 효력과 위계는?", cats: ["v2_indonesia_lainnya"] },
   // 일반 (전체 범위)
   { label: "법령 위계", q: "인도네시아 법령의 위계(헌법 > 법률 > 정부령 ...)와 충돌 시 우선순위는?", cats: [] },
   { label: "외국인 사업 형태", q: "외국인이 인도네시아에서 사업할 때 가능한 법적 형태(PT PMA, 대표사무소 등)는?", cats: [] },
@@ -233,8 +233,14 @@ function applyHealth(data) {
     }
   } else if (data.ok && data.collection_count > 0) {
     _warmingRetries = 0;
-    setStatus(`연결 OK · 청크 ${formatCount(data.collection_count)}개 로드됨`, "ok");
-    renderCorpus(data.collections || {}, data.collection_count);
+    // 법령(고유 PDF) 수가 있으면 그걸 표시, 없으면 청크 수로 fallback (구버전 백엔드 호환).
+    const docTotal = Number(data.doc_count || 0);
+    if (docTotal > 0) {
+      setStatus(`연결 OK · 법령 ${formatCount(docTotal)}개 인덱싱됨`, "ok");
+    } else {
+      setStatus(`연결 OK · 청크 ${formatCount(data.collection_count)}개 로드됨`, "ok");
+    }
+    renderCorpus(data.collections || {}, data.collection_count, data.collection_docs || null, docTotal);
   } else if (data.ok) {
     setStatus("연결 OK · DB 비어있음 (ingest.py 실행 필요)", "warn");
     els.corpus.hidden = true;
@@ -246,9 +252,14 @@ function applyHealth(data) {
 
 let lastCorpusData = null; // 마지막 health 응답 캐시 (정렬 변경 시 재렌더용)
 
-function renderCorpus(perCollection, total) {
-  lastCorpusData = { perCollection, total };
-  const entries = Object.entries(perCollection || {}).filter(([, n]) => n > 0);
+function renderCorpus(perCollection, total, perCollectionDocs = null, totalDocs = 0) {
+  lastCorpusData = { perCollection, total, perCollectionDocs, totalDocs };
+  // 카드/총계/정렬 모두 "법령 수" 기준. 청크 수는 hover tooltip에만 노출.
+  // 백엔드가 collection_docs를 안 주는 구버전이면 청크 수로 fallback.
+  const useDocs = perCollectionDocs && Object.keys(perCollectionDocs).length > 0;
+  const primary = useDocs ? perCollectionDocs : (perCollection || {});
+  const primaryTotal = useDocs ? totalDocs : total;
+  const entries = Object.entries(primary).filter(([, n]) => n > 0);
   if (!entries.length) {
     els.corpus.hidden = true;
     return;
@@ -280,18 +291,22 @@ function renderCorpus(perCollection, total) {
   }
   const max = entries.reduce((m, [, n]) => Math.max(m, n), 1);
 
-  els.corpusTotal.textContent = `총 ${formatCount(total)}개 청크 · ${entries.length}개 카테고리`;
+  const unitLabel = useDocs ? "법령" : "청크";
+  els.corpusTotal.textContent = `총 ${formatCount(primaryTotal)}개 ${unitLabel} · ${entries.length}종 분류`;
   els.corpusGrid.innerHTML = entries
     .map(([name, count]) => {
-      const meta = COLLECTION_META[name] || { ko: name.replace(/^indonesia_/, ""), abbr: name };
+      const meta = COLLECTION_META[name] || { ko: name.replace(/^v2_indonesia_/, ""), abbr: name };
       const pct = Math.max(2, Math.round((count / max) * 100));
       const pressed = selectedCategories.has(name) ? "true" : "false";
       const hueCls = categoryHueClass(name);
+      const chunks = (perCollection || {})[name] || 0;
+      const titleExtra = useDocs && chunks > 0 ? ` — 청크 ${formatCount(chunks)}개` : "";
+      const tooltip = `${meta.ko} (${meta.abbr})${titleExtra}`;
       return `
-        <div class="corpus-card ${hueCls}" data-col="${escapeHtml(name)}" role="button" tabindex="0" aria-pressed="${pressed}" title="${escapeHtml(meta.ko)} (${escapeHtml(meta.abbr)})">
+        <div class="corpus-card ${hueCls}" data-col="${escapeHtml(name)}" role="button" tabindex="0" aria-pressed="${pressed}" title="${escapeHtml(tooltip)}">
           <div class="cc-name">${escapeHtml(meta.ko)}</div>
           <div class="cc-abbr">${escapeHtml(meta.abbr)}</div>
-          <div class="cc-count">${formatCount(count)}<span class="cc-count-suffix">청크</span></div>
+          <div class="cc-count">${formatCount(count)}<span class="cc-count-suffix">${unitLabel}</span></div>
           <div class="cc-bar"><span style="width: ${pct}%"></span></div>
         </div>`;
     })
@@ -1855,7 +1870,7 @@ els.corpusSelectAll?.addEventListener("click", () => {
 });
 els.corpusSort?.addEventListener("change", () => {
   try { localStorage.setItem(LS_KEYS.corpusSort, els.corpusSort.value); } catch {}
-  if (lastCorpusData) renderCorpus(lastCorpusData.perCollection, lastCorpusData.total);
+  if (lastCorpusData) renderCorpus(lastCorpusData.perCollection, lastCorpusData.total, lastCorpusData.perCollectionDocs, lastCorpusData.totalDocs);
 });
 els.corpusSelectNone?.addEventListener("click", () => {
   selectedCategories.clear();

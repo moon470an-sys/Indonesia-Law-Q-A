@@ -10,4 +10,6 @@ set RAG_UPSERT_FLUSH_CHUNKS=512
 set RAG_MAX_PDF_BYTES=62914560
 set PYTHONIOENCODING=utf-8
 set PYTHONUNBUFFERED=1
-".venv\Scripts\python.exe" -u ingest_loop.py --duration 48h --interval 60s
+REM venv는 OneDrive 외부에 보관 (자세한 이유는 auto_start\watchdog.ps1 주석 참고).
+if not defined RAG_VENV_DIR set RAG_VENV_DIR=D:\venvs\rag_indonesia_law
+"%RAG_VENV_DIR%\Scripts\python.exe" -u ingest_loop.py --duration 48h --interval 60s

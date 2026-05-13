@@ -5,7 +5,9 @@ $ErrorActionPreference = "Continue"
 
 $Project = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $LogDir  = Join-Path $Project "logs"
-$Python  = Join-Path $Project ".venv\Scripts\python.exe"
+# venv는 OneDrive 외부에 보관 (자세한 이유는 watchdog.ps1 주석 참고).
+$VenvDir = if ($env:RAG_VENV_DIR) { $env:RAG_VENV_DIR } else { "D:\venvs\rag_indonesia_law" }
+$Python  = Join-Path $VenvDir "Scripts\python.exe"
 
 if (-not (Test-Path $Python)) { Write-Error "python.exe missing: $Python"; exit 1 }
 $null = New-Item -ItemType Directory -Force -Path $LogDir

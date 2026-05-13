@@ -5,8 +5,13 @@
 $ErrorActionPreference = "Continue"
 
 $Project     = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$Python      = Join-Path $Project ".venv\Scripts\python.exe"
-$ChromaExe   = Join-Path $Project ".venv\Scripts\chroma.exe"
+# venv는 OneDrive 외부(D:)에 둔다. OneDrive Files On-Demand가 .venv 안 수천 개
+# 파일을 reify하면서 file handle / non-paged pool이 폭주, BGE-M3·ChromaDB의
+# mmap이 깨지고 WinError 1450 / chroma TCP 바인딩 5분 타임아웃이 발생.
+# 환경변수 RAG_VENV_DIR가 있으면 그걸 우선.
+$VenvDir     = if ($env:RAG_VENV_DIR) { $env:RAG_VENV_DIR } else { "D:\venvs\rag_indonesia_law" }
+$Python      = Join-Path $VenvDir "Scripts\python.exe"
+$ChromaExe   = Join-Path $VenvDir "Scripts\chroma.exe"
 $ChromaPath  = "D:\rag_data\chroma_db"
 $ChromaHost  = "127.0.0.1"
 $ChromaPort  = 8001

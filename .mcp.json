@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "indonesia-law-rag": {
-      "command": "C:\\Users\\yoonseok.moon\\OneDrive - (주) ST International\\Projects\\인도네시아 법령 RAG\\.venv\\Scripts\\python.exe",
+      "command": "D:\\venvs\\rag_indonesia_law\\Scripts\\python.exe",
       "args": [
         "C:\\Users\\yoonseok.moon\\OneDrive - (주) ST International\\Projects\\인도네시아 법령 RAG\\mcp_server.py"
       ],

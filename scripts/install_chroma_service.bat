@@ -5,9 +5,9 @@ REM
 REM 사전 준비:
 REM   1) NSSM 설치:   winget install --id NSSM.NSSM
 REM      (또는 https://nssm.cc 에서 다운로드)
-REM   2) chromadb이 .venv에 설치되어 있어야 함:
-REM      .\.venv\Scripts\pip install -U chromadb
-REM      → .venv\Scripts\chroma.exe 가 존재해야 함
+REM   2) chromadb이 venv에 설치되어 있어야 함 (기본: D:\venvs\rag_indonesia_law):
+REM      "%RAG_VENV_DIR%\Scripts\pip" install -U chromadb
+REM      → "%RAG_VENV_DIR%\Scripts\chroma.exe" 가 존재해야 함
 REM
 REM 실행: 관리자 권한 cmd 또는 PowerShell 에서
 REM   scripts\install_chroma_service.bat
@@ -20,7 +20,10 @@ pushd "%PROJECT_DIR%"
 set PROJECT_DIR=%CD%
 popd
 
-set VENV=%PROJECT_DIR%\.venv
+REM venv는 OneDrive 외부에 둔다 (Files On-Demand가 .venv 수천 개 파일을 reify하면서
+REM file handle / non-paged pool이 폭주, mmap이 깨지고 chroma TCP 바인딩 실패).
+if not defined RAG_VENV_DIR set RAG_VENV_DIR=D:\venvs\rag_indonesia_law
+set VENV=%RAG_VENV_DIR%
 set CHROMA_EXE=%VENV%\Scripts\chroma.exe
 set CHROMA_PATH=D:\rag_data\chroma_db
 set HOST=127.0.0.1

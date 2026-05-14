@@ -2408,18 +2408,53 @@ def query_stream(req: QueryRequest, x_api_token: str | None = Header(default=Non
                         v = getattr(usage, k, None) or 0
                         cache_stats[k] = (cache_stats.get(k) or 0) + v
         except RateLimitError as exc:
-            # SDK 자동 재시도(max_retries=4)도 못 뚫은 ITPM 한도. 사용자에게 명확히 안내.
+            # SDK 자동 재시도도 못 뚫은 ITPM 한도. tool 호출로 messages가 커진 게
+            # 원인이므로, retry-after만큼 기다린 뒤 tools 없이(=요청이 훨씬 작음)
+            # 마지막 합성을 1회 시도해 답변을 살린다. 그래도 실패하면 그때 포기.
             retry_after = None
             try:
                 retry_after = exc.response.headers.get("retry-after")
             except Exception:
                 pass
-            logger.warning("agent streaming rate_limited (retry-after=%s)", retry_after)
+            try:
+                wait_s = min(int(float(retry_after)), 50) if retry_after else 8
+            except (ValueError, TypeError):
+                wait_s = 8
+            logger.warning("agent streaming rate_limited (retry-after=%s) — %ds 후 tools 없이 salvage 합성", retry_after, wait_s)
             yield _sse("rate_limited", {
-                "message": "Anthropic API 분당 토큰 한도 초과. 잠시 후 다시 시도해 주세요.",
+                "message": f"Anthropic API 분당 토큰 한도 — {wait_s}초 후 도구 없이 답변을 합성합니다.",
                 "retry_after_sec": retry_after,
+                "recovering": True,
             })
-            return
+            time.sleep(wait_s)
+            try:
+                messages_loop.append({
+                    "role": "user",
+                    "content": "추가 도구 호출 없이, 지금까지 확보된 [참고 문서]와 tool_result만 근거로 한국어 최종 답변을 작성하세요. 인용 형식(파일명, 페이지, 조항)은 system prompt 규정 그대로.",
+                })
+                with client.messages.stream(
+                    model=CLAUDE_MODEL,
+                    system=SYSTEM_PROMPT_CACHED,
+                    messages=messages_loop,
+                    max_tokens=MAX_ANSWER_TOKENS,
+                ) as sstream:
+                    for event in sstream:
+                        if getattr(event, "type", "") == "content_block_delta":
+                            delta = getattr(event, "delta", None)
+                            if delta and getattr(delta, "type", "") == "text_delta":
+                                accumulated_answer.append(delta.text)
+                                yield _sse("token", {"text": delta.text})
+                    sfinal = sstream.get_final_message()
+                    su = sfinal.usage
+                    for k in ("input_tokens", "output_tokens",
+                              "cache_creation_input_tokens", "cache_read_input_tokens"):
+                        v = getattr(su, k, None) or 0
+                        cache_stats[k] = (cache_stats.get(k) or 0) + v
+                # salvage 성공 — 아래 정상 흐름(critique/verifier/done)으로 빠져나간다.
+            except Exception as exc2:  # noqa: BLE001
+                logger.warning("salvage 합성도 실패: %s", exc2)
+                yield _sse("error", {"message": "API 분당 토큰 한도 초과로 답변을 완성하지 못했습니다. 잠시 후 다시 시도해 주세요."})
+                return
         except Exception as exc:
             logger.exception("agent streaming 실패")
             yield _sse("error", {"message": f"{type(exc).__name__}: {exc}"})

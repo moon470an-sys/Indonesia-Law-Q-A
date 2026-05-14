@@ -1268,8 +1268,10 @@ async function postQueryStream(base, q, topK, callbacks, options = {}) {
   const ctrl = new AbortController();
   // idle timeout — 5분 flat timer가 아니라 "마지막 수신 후 N초 무응답"이면 중단.
   // 정상 쿼리는 tool loop가 길어도 토큰/이벤트가 계속 흘러 타이머가 매번 리셋돼 안 끊긴다.
-  // 서버가 API 한도 backoff 등으로 진짜 멈췄을 때만 발동 → 5분 기다리지 않고 즉시 명확한 에러.
-  const IDLE_TIMEOUT_MS = 120000;
+  // 서버가 API 한도 backoff 등으로 진짜 멈췄을 때만 발동 → 5분 기다리지 않고 명확한 에러.
+  // 240초: multi_query_retrieve(analyze + 수십 회 벡터검색)가 단독으로 100초+ 걸리는
+  // 사례가 관측돼 충분한 여유를 둠. 이 구간엔 SSE 이벤트가 없어 타이머가 리셋 안 된다.
+  const IDLE_TIMEOUT_MS = 240000;
   let idleTimer = null;
   let idleAbort = false;
   const armIdle = () => {
@@ -1388,6 +1390,10 @@ async function askQuestion() {
       if (stageEl && data?.is_followup) {
         stageEl.textContent = `이전 대화 이어가기 (turn ${data.turn})… 벡터 검색 중`;
       }
+    },
+    retrieving: (data) => {
+      // 서버가 retrieval(analyze + 벡터검색) 시작 — 수십 초 걸릴 수 있어 진행 표시.
+      if (stageEl) stageEl.textContent = data?.message || "관련 법령 검색 중…";
     },
     sources: (data) => {
       receivedSources = data.sources || [];

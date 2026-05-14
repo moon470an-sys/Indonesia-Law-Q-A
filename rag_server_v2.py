@@ -2151,16 +2151,23 @@ def query_stream(req: QueryRequest, x_api_token: str | None = Header(default=Non
     # Phase 7: conversation history 로드 (또는 새 대화 시작)
     conv_id, history_messages = get_or_create_conversation(req.conversation_id)
 
-    candidates, debug, analysis = multi_query_retrieve(req.question, req.top_k, req.categories)
-    t_retrieve = time.time() - t0
-
     def event_gen():
-        # conversation_id 먼저 보냄 — frontend가 다음 turn에 이 id 재사용
+        # conversation_id 먼저 보냄 — frontend가 다음 turn에 이 id 재사용.
+        # 이 yield는 multi_query_retrieve보다 먼저 나가야 한다: retrieval은 analyze
+        # (Haiku 호출) + 수십 회 ChromaDB 쿼리로 수십 초가 걸리는데, 예전엔 그게
+        # event_gen 바깥에서 돌아 첫 SSE 바이트까지 화면이 수십 초 멈춰 보였다.
+        # 이제 conversation/retrieving를 즉시 흘려 연결을 살리고 진행 상태를 알린다.
         yield _sse("conversation", {
             "conversation_id": conv_id,
             "turn": len(history_messages) // 2 + 1,
             "is_followup": len(history_messages) > 0,
         })
+        yield _sse("retrieving", {"message": "관련 법령 검색 중…"})
+
+        candidates, debug, analysis = multi_query_retrieve(
+            req.question, req.top_k, req.categories,
+        )
+        t_retrieve = time.time() - t0
 
         if not candidates:
             yield _sse("error", {"message": "제공된 문서에서 관련 내용을 찾을 수 없습니다."})

@@ -11,6 +11,8 @@ v2 (BGE-M3 1024d, v2_indonesia_*) 는 별도 포트 8002로 운영.
 """
 from __future__ import annotations
 
+import copy
+import functools
 import json
 import logging
 import os
@@ -629,9 +631,40 @@ INTENT_HINT = {
 }
 
 
-def analyze_query(question: str) -> dict:
-    """Claude Haiku로 query를 5가지 정보로 분석 (intent + sub_queries + keywords + HyDE + category)."""
+@functools.lru_cache(maxsize=256)
+def _analyze_query_cached(question: str) -> dict:
+    """analyze_query의 실제 작업 — 성공 결과만 lru_cache. 실패 시 예외를 던져
+    lru_cache가 캐시하지 않게 한다(다음 호출에서 재시도 가능). 반환 dict는 캐시에
+    공유되므로 호출자는 절대 mutate하면 안 된다 — analyze_query가 사본을 돌려준다."""
     client = get_anthropic()
+    resp = client.messages.create(
+        model=CLAUDE_HAIKU,
+        max_tokens=2000,
+        messages=[{"role": "user", "content": QUERY_ANALYSIS_PROMPT.format(question=question)}],
+    )
+    text = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text")
+    m = re.search(r"\{.*\}", text, re.DOTALL)
+    if not m:
+        raise ValueError("analyze 응답에서 JSON을 찾지 못함")
+    data = json.loads(m.group(0))
+    intent = data.get("intent", "general")
+    if intent not in INTENT_STRATEGY:
+        intent = "general"
+    return {
+        "intent": intent,
+        "sub_queries": data.get("sub_queries", []) or [],
+        "id_keywords": data.get("id_keywords", []) or [],
+        "hypothetical_id_answers": data.get("hypothetical_id_answers", []) or [],
+        "category_filter": data.get("category_filter", []) or [],
+    }
+
+
+def analyze_query(question: str) -> dict:
+    """Claude Haiku로 query를 5가지 정보로 분석 (intent + sub_queries + keywords + HyDE + category).
+
+    동일 질문은 lru_cache로 Haiku 호출(~6s)을 건너뛴다. 캐시된 dict는 공유 객체라
+    deepcopy 사본을 돌려줘 호출자(multi_query_retrieve 등)의 mutation으로부터 보호.
+    """
     default = {
         "intent": "general",
         "sub_queries": [],
@@ -640,26 +673,7 @@ def analyze_query(question: str) -> dict:
         "category_filter": [],
     }
     try:
-        resp = client.messages.create(
-            model=CLAUDE_HAIKU,
-            max_tokens=2000,
-            messages=[{"role": "user", "content": QUERY_ANALYSIS_PROMPT.format(question=question)}],
-        )
-        text = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text")
-        m = re.search(r"\{.*\}", text, re.DOTALL)
-        if not m:
-            return default
-        data = json.loads(m.group(0))
-        intent = data.get("intent", "general")
-        if intent not in INTENT_STRATEGY:
-            intent = "general"
-        return {
-            "intent": intent,
-            "sub_queries": data.get("sub_queries", []) or [],
-            "id_keywords": data.get("id_keywords", []) or [],
-            "hypothetical_id_answers": data.get("hypothetical_id_answers", []) or [],
-            "category_filter": data.get("category_filter", []) or [],
-        }
+        return copy.deepcopy(_analyze_query_cached(question))
     except Exception as exc:
         logger.warning("query analyze 실패, 원본 query로 fallback: %s", exc)
         return default
@@ -1498,6 +1512,9 @@ def _merge_critiques(initial: dict, adv: dict) -> dict:
 
 RETRY_MAX = int(os.getenv("RAG_CRITIQUE_RETRY_MAX", "1"))
 RETRY_ON_MEDIUM_MIN_ISSUES = int(os.getenv("RAG_CRITIQUE_RETRY_ON_MEDIUM_MIN_ISSUES", "2"))
+# 미검증 인용 N건 이상일 때만 full regenerate. 1건은 정규식 매칭 한계(포맷 변형 등)인
+# 경우가 많아 쿼리 시간을 2배로 늘릴 가치가 없다.
+VERIFIER_RETRY_MIN_UNVERIFIED = int(os.getenv("RAG_VERIFIER_RETRY_MIN_UNVERIFIED", "2"))
 
 # (Pasal 7 ayat (1), 출처: 파일명.pdf, p.5) 패턴. ayat 부분은 옵션, 페이지는 숫자.
 # 한국어/영문 컴마, 콜론 변형 허용.
@@ -1610,8 +1627,11 @@ def should_retry(critique: dict, verifier: dict | None = None) -> tuple[bool, st
     if RETRY_MAX <= 0:
         return False, "disabled"
     # 1) deterministic verifier — LLM call 없이 즉시 판정. 우선 신호.
-    if verifier and (verifier.get("unverified") or 0) > 0:
-        return True, f"verifier_unverified={verifier['unverified']}"
+    #    단, 미검증 1건은 정규식 매칭 한계인 경우가 많아 full regenerate 안 함.
+    #    2건 이상일 때만 재생성 (LLM critique의 serious issue는 아래에서 별도로 잡음).
+    unv = (verifier or {}).get("unverified") or 0
+    if unv >= VERIFIER_RETRY_MIN_UNVERIFIED:
+        return True, f"verifier_unverified={unv}"
     # 2) critique (LLM-based)
     conf = (critique.get("confidence") or "unknown").lower()
     issues = critique.get("issues") or []

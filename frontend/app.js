@@ -1266,7 +1266,17 @@ async function postQueryStream(base, q, topK, callbacks, options = {}) {
   if (selectedCategories.size) body.categories = [...selectedCategories];
   if (options.conversationId) body.conversation_id = options.conversationId;
   const ctrl = new AbortController();
-  const timeoutId = setTimeout(() => ctrl.abort(), 300000); // 5분 안전망
+  // idle timeout — 5분 flat timer가 아니라 "마지막 수신 후 N초 무응답"이면 중단.
+  // 정상 쿼리는 tool loop가 길어도 토큰/이벤트가 계속 흘러 타이머가 매번 리셋돼 안 끊긴다.
+  // 서버가 API 한도 backoff 등으로 진짜 멈췄을 때만 발동 → 5분 기다리지 않고 즉시 명확한 에러.
+  const IDLE_TIMEOUT_MS = 120000;
+  let idleTimer = null;
+  let idleAbort = false;
+  const armIdle = () => {
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => { idleAbort = true; ctrl.abort(); }, IDLE_TIMEOUT_MS);
+  };
+  armIdle();
   try {
     const resp = await fetch(`${base}/query/stream`, {
       method: "POST",
@@ -1282,8 +1292,21 @@ async function postQueryStream(base, q, topK, callbacks, options = {}) {
     const decoder = new TextDecoder("utf-8");
     let buffer = "";
     while (true) {
-      const { done, value } = await reader.read();
+      let chunk;
+      try {
+        chunk = await reader.read();
+      } catch (e) {
+        if (idleAbort) {
+          throw new Error(
+            `서버 응답이 ${IDLE_TIMEOUT_MS / 1000}초간 없어 중단했습니다 — ` +
+            `API 분당 한도 초과(rate limit) 가능성이 큽니다. 잠시 후 다시 시도해 주세요.`,
+          );
+        }
+        throw e;
+      }
+      const { done, value } = chunk;
       if (done) break;
+      armIdle(); // 데이터 도착 → idle 타이머 리셋
       buffer += decoder.decode(value, { stream: true });
       // SSE event 단위 split. event 사이 \n\n.
       const events = buffer.split("\n\n");
@@ -1309,7 +1332,7 @@ async function postQueryStream(base, q, topK, callbacks, options = {}) {
       }
     }
   } finally {
-    clearTimeout(timeoutId);
+    if (idleTimer) clearTimeout(idleTimer);
   }
 }
 
@@ -1355,6 +1378,7 @@ async function askQuestion() {
 
   let receivedCritique = null;
   let receivedConversation = null;
+  let receivedRateLimit = null;
   const streamCallbacks = {
     conversation: (data) => {
       receivedConversation = data;
@@ -1416,6 +1440,12 @@ async function askQuestion() {
       if (renderRaf) cancelAnimationFrame(renderRaf);
       answerEl.innerHTML = renderAnswer(partialAnswer);
     },
+    rate_limited: (data) => {
+      // 서버가 Anthropic API 분당 토큰 한도(ITPM)에 막힘.
+      // agent 단계면 답변이 없고, retry 단계면 1차 답변은 이미 있다 (throw 안 함 — done까지 진행).
+      receivedRateLimit = data;
+      if (stageEl) stageEl.textContent = `⚠ API 한도 초과 — ${data?.message || "잠시 후 재시도"}`;
+    },
     error: (data) => {
       throw new Error(data.message || "stream error");
     },
@@ -1452,6 +1482,13 @@ async function askQuestion() {
         throw e;
       }
     }
+    // rate limit으로 답변을 아예 못 받은 경우 → 명확한 에러로 처리 (빈 답변 저장 방지)
+    if (receivedRateLimit && !partialAnswer.trim()) {
+      throw new Error(
+        receivedRateLimit.message ||
+          "Anthropic API 분당 토큰 한도 초과 — 잠시 후 다시 시도해 주세요.",
+      );
+    }
     const elapsedMs = performance.now() - t0;
     stopStages();
     skeleton.remove();
@@ -1468,7 +1505,12 @@ async function askQuestion() {
     els.question.value = "";
     autosizeQuestion();
     clearDraft();
-    setStatus("답변 생성 완료", "ok");
+    if (receivedRateLimit) {
+      // 답변은 받았지만 retry 단계에서 API 한도에 막힘 — 1차 답변 유지하되 사용자에게 고지.
+      setStatus("답변 생성 완료 (⚠ API 한도로 재검수 일부 생략됨)", "info");
+    } else {
+      setStatus("답변 생성 완료", "ok");
+    }
   } catch (e) {
     stopStages();
     skeleton.remove();

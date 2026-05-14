@@ -327,10 +327,12 @@ def get_anthropic() -> Anthropic:
     if _state["anthropic"] is None:
         if not ANTHROPIC_API_KEY:
             raise RuntimeError("ANTHROPIC_API_KEY 없음")
-        # max_retries 4: SDK가 429/503에 대해 exponential backoff (0.5→1→2→4s)로
-        # 자동 재시도. Tier 1의 30k ITPM에서 일시적 burst가 1~2초 안에 풀리는 경우
-        # 클라이언트는 알아채지 못하고 정상 응답을 받게 됨.
-        _state["anthropic"] = Anthropic(api_key=ANTHROPIC_API_KEY, max_retries=4)
+        # max_retries 2: SDK가 429/503에 exponential backoff로 자동 재시도.
+        # 2회면 일시적 1~2초 burst는 흡수하면서, 지속적 ITPM 한도일 때는 빠르게
+        # RateLimitError를 던져 event_gen이 rate_limited SSE를 보낼 수 있다.
+        # (4회였을 땐 429 retry-after(수십 초)를 4번 기다리며 generator가 분 단위로
+        #  멈춰 → SSE 무응답 → 프론트 idle/flat timeout abort. 5분 hang의 주범.)
+        _state["anthropic"] = Anthropic(api_key=ANTHROPIC_API_KEY, max_retries=2)
     return _state["anthropic"]
 
 

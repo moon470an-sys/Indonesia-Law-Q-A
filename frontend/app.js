@@ -1269,9 +1269,10 @@ async function postQueryStream(base, q, topK, callbacks, options = {}) {
   // idle timeout — 5분 flat timer가 아니라 "마지막 수신 후 N초 무응답"이면 중단.
   // 정상 쿼리는 tool loop가 길어도 토큰/이벤트가 계속 흘러 타이머가 매번 리셋돼 안 끊긴다.
   // 서버가 API 한도 backoff 등으로 진짜 멈췄을 때만 발동 → 5분 기다리지 않고 명확한 에러.
-  // 240초: multi_query_retrieve(analyze + 수십 회 벡터검색)가 단독으로 100초+ 걸리는
-  // 사례가 관측돼 충분한 여유를 둠. 이 구간엔 SSE 이벤트가 없어 타이머가 리셋 안 된다.
-  const IDLE_TIMEOUT_MS = 240000;
+  // 300초: "법체계 전체 종합" 같은 극단 질의는 8분+ 걸리며 검색·도구실행 사이
+  // 무응답 구간이 생길 수 있다. 정상 쿼리는 토큰/이벤트가 계속 흐르므로 타이머가
+  // 리셋돼 안 끊기고, 이 시간 내내 진짜 무응답이면 서버가 멈춘 것으로 본다.
+  const IDLE_TIMEOUT_MS = 300000;
   let idleTimer = null;
   let idleAbort = false;
   const armIdle = () => {

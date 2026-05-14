@@ -967,6 +967,10 @@ TOOLS = [
 # 자료 수집 도중 잘려 iter_limit_synthesis 강제 합성으로 넘어가고, 그 합성이
 # API 한도에 막히면 1번째 announce 한 줄만 남는 버그가 생겨 5로 복귀.
 MAX_TOOL_ITERATIONS = 5
+# regenerate(재작성) 경로는 이미 1차 답변 + 전체 [참고 문서]를 갖고 들어가
+# "지목된 이슈를 고치는" 단계라 깊은 재조사가 불필요하다. 본답변과 동일하게
+# 5회를 돌면 쿼리 시간이 통째로 2배가 되므로 별도로 작게 둔다.
+RETRY_MAX_TOOL_ITERATIONS = 2
 
 # ===== Phase 7: Conversational Memory =====
 # In-memory conversation store. server restart 시 history 소실 (단순화).
@@ -2458,7 +2462,7 @@ def query_stream(req: QueryRequest, x_api_token: str | None = Header(default=Non
                 accumulated_retry: list[str] = []
                 tool_calls_retry: list[dict[str, Any]] = []
                 iter_count_retry = 0
-                for iter_n in range(MAX_TOOL_ITERATIONS):
+                for iter_n in range(RETRY_MAX_TOOL_ITERATIONS):
                     iter_count_retry = iter_n + 1
                     with client.messages.stream(
                         model=CLAUDE_MODEL,

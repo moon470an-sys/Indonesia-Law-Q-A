@@ -104,9 +104,10 @@ RRF_K = 60                # RRF 상수 (검색 분야 표준값)
 MMR_LAMBDA = 0.7          # MMR relevance vs diversity 가중치
 BM25_FETCH_MULTIPLIER = 2 # BM25는 dense보다 후보 폭을 더 잡고 RRF에서 자연스레 솎임
 # multi_query_retrieve 성능: dense 조회는 (확장쿼리 × 컬렉션) 만큼의 ChromaDB
-# 네트워크 왕복이라 직렬 실행 시 분 단위로 느려진다.
-MAX_EXPANDED_QUERIES = 6      # 원본 + sub_query + id_keywords + HyDE 총 상한
-DENSE_RETRIEVAL_WORKERS = 10  # ChromaDB col.query() 동시 실행 스레드 수
+# 네트워크 왕복인데 ThreadPoolExecutor 병렬화로 fan-out 비용이 거의 사라졌다.
+# 그래서 확장쿼리 상한은 답변 풍부함을 위해 넉넉히(10) 둔다 — 안전망 역할만.
+MAX_EXPANDED_QUERIES = 10     # 원본 + sub_query + id_keywords + HyDE 총 상한 (안전망)
+DENSE_RETRIEVAL_WORKERS = 12  # ChromaDB col.query() 동시 실행 스레드 수
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 ALLOWED_ORIGINS = [
@@ -707,19 +708,19 @@ def multi_query_retrieve(
     intent = analysis["intent"]
     strat = INTENT_STRATEGY[intent]
 
-    # query 리스트 구축 (label, text)
+    # query 리스트 구축 (label, text). sub_query/HyDE는 후보 폭(답변 풍부함)에
+    # 직결되므로 넉넉히 — 병렬 dense 조회라 fan-out 비용은 거의 없다.
     queries: list[tuple[str, str]] = [("original", question)]
-    for i, sq in enumerate(analysis["sub_queries"][:3]):
+    for i, sq in enumerate(analysis["sub_queries"][:4]):
         if isinstance(sq, str) and sq.strip():
             queries.append((f"sub_{i+1}", sq.strip()))
     if analysis["id_keywords"]:
         queries.append(("id_keywords", " ".join(analysis["id_keywords"])))
-    for i, hyde in enumerate(analysis["hypothetical_id_answers"][:2]):
+    for i, hyde in enumerate(analysis["hypothetical_id_answers"][:3]):
         if isinstance(hyde, str) and hyde.strip():
             queries.append((f"hyde_{i+1}", hyde.strip()))
 
-    # 확장 쿼리 총량 hard cap — 각 쿼리는 컬렉션 수만큼 ChromaDB 조회를 유발한다.
-    # 원본(queries[0])은 항상 유지되고 그 뒤를 잘라낸다.
+    # 확장 쿼리 총량 안전망 cap (보통 안 걸림). 원본(queries[0])은 항상 유지.
     if len(queries) > MAX_EXPANDED_QUERIES:
         queries = queries[:MAX_EXPANDED_QUERIES]
 
@@ -961,10 +962,11 @@ TOOLS = [
     },
 ]
 
-# 3: 각 iteration이 (full context Claude streaming 호출 + tool 실행)이라 무겁다.
-# 5 → 3으로 줄여 무거운 질의의 꼬리 지연을 제한. 한도 도달 시 for-else의
-# iter_limit_synthesis가 tools 없이 최종 답변을 1회 강제 합성해 graceful 처리.
-MAX_TOOL_ITERATIONS = 3
+# 종합 질의("산림법 총람" 등)는 모델이 여러 번 tool을 호출해 자료를 모은 뒤
+# 마지막에 풍부한 답변을 자연 완료(stop_reason=end_turn)한다. 3으로 줄였더니
+# 자료 수집 도중 잘려 iter_limit_synthesis 강제 합성으로 넘어가고, 그 합성이
+# API 한도에 막히면 1번째 announce 한 줄만 남는 버그가 생겨 5로 복귀.
+MAX_TOOL_ITERATIONS = 5
 
 # ===== Phase 7: Conversational Memory =====
 # In-memory conversation store. server restart 시 history 소실 (단순화).

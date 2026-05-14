@@ -19,6 +19,7 @@ import threading
 import time
 import unicodedata
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -100,6 +101,10 @@ BM25_DIR.mkdir(parents=True, exist_ok=True)
 RRF_K = 60                # RRF 상수 (검색 분야 표준값)
 MMR_LAMBDA = 0.7          # MMR relevance vs diversity 가중치
 BM25_FETCH_MULTIPLIER = 2 # BM25는 dense보다 후보 폭을 더 잡고 RRF에서 자연스레 솎임
+# multi_query_retrieve 성능: dense 조회는 (확장쿼리 × 컬렉션) 만큼의 ChromaDB
+# 네트워크 왕복이라 직렬 실행 시 분 단위로 느려진다.
+MAX_EXPANDED_QUERIES = 6      # 원본 + sub_query + id_keywords + HyDE 총 상한
+DENSE_RETRIEVAL_WORKERS = 10  # ChromaDB col.query() 동시 실행 스레드 수
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 ALLOWED_ORIGINS = [
@@ -690,14 +695,19 @@ def multi_query_retrieve(
 
     # query 리스트 구축 (label, text)
     queries: list[tuple[str, str]] = [("original", question)]
-    for i, sq in enumerate(analysis["sub_queries"][:4]):
+    for i, sq in enumerate(analysis["sub_queries"][:3]):
         if isinstance(sq, str) and sq.strip():
             queries.append((f"sub_{i+1}", sq.strip()))
     if analysis["id_keywords"]:
         queries.append(("id_keywords", " ".join(analysis["id_keywords"])))
-    for i, hyde in enumerate(analysis["hypothetical_id_answers"][:3]):
+    for i, hyde in enumerate(analysis["hypothetical_id_answers"][:2]):
         if isinstance(hyde, str) and hyde.strip():
             queries.append((f"hyde_{i+1}", hyde.strip()))
+
+    # 확장 쿼리 총량 hard cap — 각 쿼리는 컬렉션 수만큼 ChromaDB 조회를 유발한다.
+    # 원본(queries[0])은 항상 유지되고 그 뒤를 잘라낸다.
+    if len(queries) > MAX_EXPANDED_QUERIES:
+        queries = queries[:MAX_EXPANDED_QUERIES]
 
     embeddings = encode_query([q[1] for q in queries])
 
@@ -733,40 +743,61 @@ def multi_query_retrieve(
     col_names_filter = {c.name for c in cols}
 
     # === Dense retrieval (per-query × per-collection) ===
+    # col.query()는 ChromaDB 서버로의 네트워크 왕복이라 (확장쿼리 × 컬렉션) 만큼을
+    # 직렬 실행하면 분 단위로 느려진다. I/O(col.query)만 ThreadPoolExecutor로 병렬화하고,
+    # 결과 누적(candidates/rrf_scores 변경)은 메인 스레드에서 직렬 처리해 락을 피한다.
+    dense_tasks = []
     for (label, _qtext), emb in zip(queries, embeddings):
         for col in cols:
             col_weight = HIERARCHY_WEIGHTS.get(col.name, DEFAULT_HIERARCHY_WEIGHT)
             if auto_categories and col.name in auto_categories:
                 col_weight *= 0.92
+            dense_tasks.append((label, emb, col, col_weight))
+
+    def _run_dense(task):
+        label, emb, col, col_weight = task
+        try:
+            res = col.query(query_embeddings=[emb], n_results=fetch_per)
+            return (label, col, col_weight, res, None)
+        except Exception as exc:  # noqa: BLE001
+            return (label, col, col_weight, None, exc)
+
+    if dense_tasks:
+        workers = min(DENSE_RETRIEVAL_WORKERS, len(dense_tasks))
+        with ThreadPoolExecutor(max_workers=workers) as _ex:
+            dense_results = list(_ex.map(_run_dense, dense_tasks))
+    else:
+        dense_results = []
+
+    # 결과 누적 — ex.map은 입력 순서를 보존하므로 직렬 버전과 동일한 순서로 처리된다.
+    for label, col, col_weight, res, exc in dense_results:
+        if exc is not None:
+            logger.warning("col %s dense query 실패: %s", col.name, exc)
+            continue
+        ids = (res.get("ids") or [[]])[0]
+        docs = (res.get("documents") or [[]])[0]
+        metas = (res.get("metadatas") or [[]])[0]
+        dists = (res.get("distances") or [[]])[0]
+        for rank, (cid, doc, meta, dist) in enumerate(zip(ids, docs, metas, dists)):
             try:
-                res = col.query(query_embeddings=[emb], n_results=fetch_per)
-            except Exception as exc:
-                logger.warning("col %s dense query 실패: %s", col.name, exc)
-                continue
-            ids = (res.get("ids") or [[]])[0]
-            docs = (res.get("documents") or [[]])[0]
-            metas = (res.get("metadatas") or [[]])[0]
-            dists = (res.get("distances") or [[]])[0]
-            for rank, (cid, doc, meta, dist) in enumerate(zip(ids, docs, metas, dists)):
-                try:
-                    page_num = int(meta.get("page", 99) or 99)
-                except (ValueError, TypeError):
-                    page_num = 99
-                page_pen = EARLY_PAGE_PENALTY if page_num <= EARLY_PAGE_THRESHOLD else 1.0
-                eff = (dist if dist is not None else 1.0) * col_weight * page_pen
-                # RRF: 1/(k+rank+1), col_weight로 나눠 위계 선호 유지
-                rrf_scores[cid] = rrf_scores.get(cid, 0.0) + (1.0 / (RRF_K + rank + 1)) / col_weight
-                prev = candidates.get(cid)
-                if prev is None or eff < prev["eff_dist"]:
-                    candidates[cid] = {
-                        "id": cid,
-                        "text": doc,
-                        "metadata": meta,
-                        "dist": dist,
-                        "eff_dist": eff,
-                        "source_query": label,
-                        "collection": col.name,
-                    }
+                page_num = int(meta.get("page", 99) or 99)
+            except (ValueError, TypeError):
+                page_num = 99
+            page_pen = EARLY_PAGE_PENALTY if page_num <= EARLY_PAGE_THRESHOLD else 1.0
+            eff = (dist if dist is not None else 1.0) * col_weight * page_pen
+            # RRF: 1/(k+rank+1), col_weight로 나눠 위계 선호 유지
+            rrf_scores[cid] = rrf_scores.get(cid, 0.0) + (1.0 / (RRF_K + rank + 1)) / col_weight
+            prev = candidates.get(cid)
+            if prev is None or eff < prev["eff_dist"]:
+                candidates[cid] = {
+                    "id": cid,
+                    "text": doc,
+                    "metadata": meta,
+                    "dist": dist,
+                    "eff_dist": eff,
+                    "source_query": label,
+                    "collection": col.name,
+                }
 
     # === BM25 retrieval (global, original + id_keywords만 — HyDE/sub는 dense에 맡김) ===
     bm25_queries: list[tuple[str, str]] = [("original_bm25", question)]
@@ -916,7 +947,10 @@ TOOLS = [
     },
 ]
 
-MAX_TOOL_ITERATIONS = 5
+# 3: 각 iteration이 (full context Claude streaming 호출 + tool 실행)이라 무겁다.
+# 5 → 3으로 줄여 무거운 질의의 꼬리 지연을 제한. 한도 도달 시 for-else의
+# iter_limit_synthesis가 tools 없이 최종 답변을 1회 강제 합성해 graceful 처리.
+MAX_TOOL_ITERATIONS = 3
 
 # ===== Phase 7: Conversational Memory =====
 # In-memory conversation store. server restart 시 history 소실 (단순화).

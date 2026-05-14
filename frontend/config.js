@@ -1,7 +1,7 @@
 // 기본값. UI 설정에서 입력하면 localStorage 값이 우선합니다.
 window.APP_CONFIG = {
-  // Cloudflare Tunnel을 만든 뒤 이 자리에 자신의 URL을 채워두면 기본값이 됩니다.
-  // 예: "https://indonesia-law-rag.your-subdomain.trycloudflare.com"
-  defaultApiUrl: "",
+  // ngrok static domain — 고정 URL이라 watchdog가 갱신하지 않습니다.
+  // tunnel.json도 같은 값으로 커밋돼 있고, 이 값은 그 fallback입니다.
+  defaultApiUrl: "https://refurbish-anew-purveyor.ngrok-free.dev",
   defaultTopK: 5,
 };

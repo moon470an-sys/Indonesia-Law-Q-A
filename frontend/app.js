@@ -112,10 +112,13 @@ function formatCount(n) {
 }
 
 // fetch with timeout — 죽은 URL/네트워크 문제로 무한 대기하지 않도록 모든 헬스/터널 fetch에 적용
+// ngrok 무료 티어는 브라우저 요청에 경고 인터스티셜(HTML)을 끼워넣는데,
+// ngrok-skip-browser-warning 헤더가 있으면 우회된다. 모든 fetch에 기본 주입.
 function fetchWithTimeout(url, opts = {}, timeoutMs = 8000) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-  return fetch(url, { ...opts, signal: ctrl.signal }).finally(() => clearTimeout(timer));
+  const headers = { "ngrok-skip-browser-warning": "true", ...(opts.headers || {}) };
+  return fetch(url, { ...opts, headers, signal: ctrl.signal }).finally(() => clearTimeout(timer));
 }
 
 async function fetchAutoUrl() {
@@ -182,18 +185,18 @@ function apiBase() {
 
 function authHeaders() {
   // POST/PUT 등 body를 보내는 호출용 (Content-Type + 옵션 토큰)
-  const h = { "Content-Type": "application/json" };
+  // ngrok-skip-browser-warning: 무료 티어 경고 인터스티셜 우회 (raw fetch 경로용)
+  const h = { "Content-Type": "application/json", "ngrok-skip-browser-warning": "true" };
   if (els.apiToken.value) h["X-Api-Token"] = els.apiToken.value;
   return h;
 }
 
 function getHeaders() {
-  // GET 호출용: Content-Type을 안 박아서 CORS preflight 회피.
-  // 토큰이 있을 때만 X-Api-Token을 보냄 (없으면 preflight 자체 없음).
-  // 토큰이 있어도 헤더가 하나만 있으면 그 헤더가 simple/non-simple인지에 따라 preflight 발생할 수 있음.
-  // X-Api-Token은 custom header라 항상 preflight 발생 → 토큰 있을 때만 부담.
+  // GET 호출용 추가 헤더. fetchWithTimeout이 ngrok-skip-browser-warning을 항상
+  // 주입하므로 어차피 CORS preflight는 발생한다 (서버 allow_headers=["*"]로 허용).
+  // 여기서는 토큰이 있을 때만 X-Api-Token을 얹는다.
   if (els.apiToken.value) return { "X-Api-Token": els.apiToken.value };
-  return undefined;  // headers 자체 미설정 → 100% simple GET → preflight 없음
+  return undefined;  // fetchWithTimeout이 skip-warning 헤더를 기본 주입
 }
 
 async function tryHealthOnce(base) {

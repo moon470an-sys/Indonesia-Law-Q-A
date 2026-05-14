@@ -1,5 +1,6 @@
 ﻿# Indonesia Law RAG - long-running watchdog
-# uvicorn + cloudflared 살아있게 유지, 터널 URL 자동 publish (frontend/tunnel.json -> GitHub Pages).
+# chroma + uvicorn + ngrok 살아있게 유지.
+# ngrok static domain으로 공개 URL이 고정 → tunnel.json git push / Pages 재빌드 불필요.
 # Task Scheduler logon trigger로 한 번 실행. 죽으면 자동 재시작 (Restart on failure).
 
 $ErrorActionPreference = "Continue"
@@ -16,11 +17,14 @@ $ChromaPath  = "D:\rag_data\chroma_db"
 $ChromaHost  = "127.0.0.1"
 $ChromaPort  = 8001
 $LogDir      = Join-Path $Project "logs"
-$Cloudflared = "C:\Users\yoonseok.moon\AppData\Local\Microsoft\WinGet\Packages\Cloudflare.cloudflared_Microsoft.Winget.Source_8wekyb3d8bbwe\cloudflared.exe"
+# ngrok: 무료 static domain으로 공개 URL 고정. cloudflared quick tunnel처럼 재시작마다
+# URL이 바뀌지 않으므로 tunnel.json git push / Pages 재빌드 churn이 사라진다.
+# cloudflared.exe는 백업 수단으로 디스크에 남겨두지만 watchdog는 더 이상 쓰지 않는다.
+$Ngrok       = "C:\Users\yoonseok.moon\AppData\Local\Microsoft\WinGet\Packages\Ngrok.Ngrok_Microsoft.Winget.Source_8wekyb3d8bbwe\ngrok.exe"
+$NgrokDomain = "refurbish-anew-purveyor.ngrok-free.dev"
+$TunnelUrl   = "https://$NgrokDomain"
 $PageBase    = "https://moon470an-sys.github.io/Indonesia-Law-Q-A/"
 $ShortcutName= "Indonesia Law Q&A.url"
-$TunnelJson  = Join-Path $Project "frontend\tunnel.json"
-$TunnelTxt   = Join-Path $Project ".tunnel_url"
 
 $null = New-Item -ItemType Directory -Force -Path $LogDir
 
@@ -47,7 +51,7 @@ Write-WLog "=== watchdog started (pid=$PID) sleep prevention active ==="
 
 if (-not (Test-Path $Python))      { Write-WLog "FATAL: python.exe missing ($Python)"; exit 1 }
 if (-not (Test-Path $ChromaExe))   { Write-WLog "FATAL: chroma.exe missing ($ChromaExe)"; exit 1 }
-if (-not (Test-Path $Cloudflared)) { Write-WLog "FATAL: cloudflared.exe missing"; exit 1 }
+if (-not (Test-Path $Ngrok))       { Write-WLog "FATAL: ngrok.exe missing ($Ngrok)"; exit 1 }
 if (-not (Test-Path (Join-Path $Project ".env"))) { Write-WLog "FATAL: .env missing"; exit 1 }
 
 function Test-UvicornHealth {
@@ -69,7 +73,7 @@ function Test-TunnelHealth {
 }
 
 $UvicornPidFile     = Join-Path $LogDir "uvicorn.pid"
-$CloudflaredPidFile = Join-Path $LogDir "cloudflared.pid"
+$NgrokPidFile       = Join-Path $LogDir "ngrok.pid"
 $ChromaPidFile      = Join-Path $LogDir "chroma.pid"
 
 function Stop-PidFromFile {
@@ -137,12 +141,13 @@ function Start-Chroma {
     return $false
 }
 
-function Stop-AllCloudflared {
-    Stop-PidFromFile -PidFile $CloudflaredPidFile -Label "cloudflared"
-    # 추가 안전망: 다른 경로로 떠 있는 stray cloudflared까지 정리. Get-Process는 WMI 안 씀.
-    Get-Process cloudflared -ErrorAction SilentlyContinue | ForEach-Object {
+function Stop-AllNgrok {
+    Stop-PidFromFile -PidFile $NgrokPidFile -Label "ngrok"
+    # 추가 안전망: stray ngrok도 정리. ngrok 무료 티어는 동시 세션 1개만 허용 →
+    # 이전 프로세스가 남아있으면 새 세션이 ERR_NGROK_108로 실패한다.
+    Get-Process ngrok -ErrorAction SilentlyContinue | ForEach-Object {
         Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
-        Write-WLog "  killed stray cloudflared pid=$($_.Id)"
+        Write-WLog "  killed stray ngrok pid=$($_.Id)"
     }
 }
 
@@ -188,88 +193,55 @@ function Start-Uvicorn {
     return $false
 }
 
-function Start-Cloudflared {
-    Write-WLog "starting cloudflared..."
-    Stop-AllCloudflared
+function Start-Ngrok {
+    # ngrok을 고정 domain으로 기동. cloudflared와 달리 URL이 항상 동일하므로
+    # 로그에서 URL을 스크래핑할 필요가 없다. 기동 후 공개 URL의 /healthz를
+    # 폴링해 실제로 트래픽이 흐르는지(터널 + uvicorn 둘 다) 확인한다.
+    Write-WLog "starting ngrok (domain=$NgrokDomain)..."
+    Stop-AllNgrok
     Start-Sleep -Seconds 2
-    $cfOut = Join-Path $LogDir "cloudflared.log"
-    $cfErr = Join-Path $LogDir "cloudflared.err"
-
-    for ($attempt = 1; $attempt -le 5; $attempt++) {
-        if (Test-Path $cfErr) { Remove-Item $cfErr -Force -ErrorAction SilentlyContinue }
-        $proc = Start-Process -FilePath $Cloudflared `
-            -ArgumentList "tunnel","--url","http://127.0.0.1:8000" `
-            -WindowStyle Hidden `
-            -RedirectStandardOutput $cfOut -RedirectStandardError $cfErr -PassThru
-        "$($proc.Id)" | Out-File -FilePath $CloudflaredPidFile -Encoding ascii -NoNewline
-        Write-WLog "  attempt $attempt cloudflared pid=$($proc.Id)"
-        $url = $null
-        $bad = $false
-        for ($i = 0; $i -lt 60; $i++) {
-            if (Test-Path $cfErr) {
-                # quick tunnel 서브도메인은 항상 하이픈으로 이어진 4단어
-                # (예: weapon-tongue-plan-completing). 예전 정규식 "[a-z0-9-]+"는
-                # cloudflared stderr 에러 줄의 "api.trycloudflare.com"까지 잡아
-                # 깨진 URL을 publish했다 → 하이픈 2개 이상(3단어+) 요구로 한정.
-                $m = Select-String -Path $cfErr -Pattern "https://[a-z0-9]+(?:-[a-z0-9]+){2,}\.trycloudflare\.com" -ErrorAction SilentlyContinue | Select-Object -First 1
-                if ($m) { $url = $m.Matches[0].Value; break }
-                $err = Select-String -Path $cfErr -Pattern "Error unmarshaling QuickTunnel response" -ErrorAction SilentlyContinue | Select-Object -First 1
-                if ($err) { $bad = $true; break }
-            }
-            Start-Sleep -Seconds 1
-        }
-        if ($url) {
-            Write-WLog "  got tunnel URL: $url"
-            return $url
-        }
-        Write-WLog "  attempt $attempt failed (bad500=$bad), killing pid=$($proc.Id)"
-        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+    $ngOut = Join-Path $LogDir "ngrok.log"
+    $ngErr = Join-Path $LogDir "ngrok.err"
+    $proc = Start-Process -FilePath $Ngrok `
+        -ArgumentList "http","--domain=$NgrokDomain","8000","--log=stdout","--log-format=logfmt" `
+        -WindowStyle Hidden `
+        -RedirectStandardOutput $ngOut -RedirectStandardError $ngErr -PassThru
+    "$($proc.Id)" | Out-File -FilePath $NgrokPidFile -Encoding ascii -NoNewline
+    Write-WLog "  ngrok pid=$($proc.Id), polling $TunnelUrl/healthz up to 90s"
+    for ($i = 0; $i -lt 18; $i++) {
         Start-Sleep -Seconds 5
+        if (-not (Get-Process -Id $proc.Id -ErrorAction SilentlyContinue)) {
+            Write-WLog "  ERR: ngrok process exited early — see $ngOut"
+            return $false
+        }
+        if (Test-TunnelHealth -Url $TunnelUrl) {
+            Write-WLog "  ngrok tunnel healthy after $(($i + 1) * 5)s"
+            return $true
+        }
     }
-    Write-WLog "  ERR: failed to obtain tunnel URL after 5 attempts"
-    return $null
+    Write-WLog "  ERR: ngrok tunnel did not become healthy in 90s"
+    return $false
 }
 
-function Publish-TunnelUrl {
-    param([string]$Url)
-    if (-not $Url) { return }
-
-    $Url | Out-File $TunnelTxt -Encoding utf8
-
-    $ts = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
-    $json = @{ url = $Url; updated = $ts } | ConvertTo-Json -Compress
-    $json | Out-File $TunnelJson -Encoding utf8 -NoNewline
-    Write-WLog "  wrote tunnel.json"
-
-    $encoded = [Uri]::EscapeDataString($Url)
+function Update-DesktopShortcut {
+    # URL이 고정이므로 부팅 시 한 번만 써두면 된다 (git push / Pages 재빌드 불필요).
+    $encoded = [Uri]::EscapeDataString($TunnelUrl)
     $desktop = [Environment]::GetFolderPath("Desktop")
     $shortcutPath = Join-Path $desktop $ShortcutName
     $content = "[InternetShortcut]`r`nURL=$PageBase" + "?api=$encoded`r`n"
-    [System.IO.File]::WriteAllText($shortcutPath, $content, [System.Text.Encoding]::ASCII)
-    Write-WLog "  shortcut updated: $shortcutPath"
-
-    Push-Location $Project
     try {
-        & git add frontend/tunnel.json 2>&1 | Out-Null
-        $diff = & git status --porcelain -- frontend/tunnel.json
-        if ($diff) {
-            & git commit -m "watchdog: update tunnel URL" -- frontend/tunnel.json 2>&1 | Out-Null
-            $pushOut = (& git push origin main 2>&1) -join " | "
-            Write-WLog "  git push: $pushOut"
-        } else {
-            Write-WLog "  tunnel.json unchanged, skip git push"
-        }
+        [System.IO.File]::WriteAllText($shortcutPath, $content, [System.Text.Encoding]::ASCII)
+        Write-WLog "  desktop shortcut: $shortcutPath"
     } catch {
-        Write-WLog "  git push failed: $_"
-    } finally {
-        Pop-Location
+        Write-WLog "  desktop shortcut write failed: $_"
     }
 }
 
 # === MAIN LOOP ===
-$currentTunnel = ""
-if (Test-Path $TunnelTxt) { $currentTunnel = (Get-Content $TunnelTxt -Raw).Trim() }
-Write-WLog "boot: known tunnel = $currentTunnel"
+# 공개 URL은 ngrok static domain으로 고정. frontend/tunnel.json과 config.js의
+# defaultApiUrl도 같은 값으로 커밋돼 있어 watchdog는 더 이상 그 파일들을 안 건드린다.
+Write-WLog "boot: fixed tunnel = $TunnelUrl"
+Update-DesktopShortcut
 
 # 부팅 시점 chroma 즉시 기동. RAG_CHROMA_MODE=http에서 rag_server가 8001로 붙어야 동작.
 if (-not (Test-ChromaHealth)) {
@@ -324,30 +296,22 @@ while ($true) {
             }
         }
 
-        # 터널 health: 5회 연속 실패해야 URL 재발급. 1~2회 깜빡임은 무시.
-        # 매 재발급마다 git push + Pages 빌드 + CDN propagation 비용이 크고, 그 사이 사용자는 stale URL에 묶임.
-        # $currentTunnel이 비어있으면 (부팅 첫 사이클) 즉시 시작.
-        $cfOk = $false
-        if ($currentTunnel) {
+        # 터널 health: ngrok URL은 고정이므로 죽으면 같은 domain으로 재기동만 하면 된다.
+        # ngrok 프로세스 자체가 없으면 (부팅 첫 사이클 등) 5-probe grace 없이 즉시 기동.
+        # 떠 있는데 응답만 없으면 5회 연속 실패(~1분 grace) 후 재기동 — 1~2회 깜빡임은 무시.
+        $ngrokRunning = [bool](Get-Process ngrok -ErrorAction SilentlyContinue)
+        if (-not $ngrokRunning) {
+            Write-WLog "ngrok not running, starting"
+            if (-not (Start-Ngrok)) { Write-WLog "ngrok start failed; sleep 60s and retry" }
+        } else {
+            $tunnelOk = $false
             for ($probe = 1; $probe -le 5; $probe++) {
-                if (Test-TunnelHealth -Url $currentTunnel) { $cfOk = $true; break }
+                if (Test-TunnelHealth -Url $TunnelUrl) { $tunnelOk = $true; break }
                 if ($probe -lt 5) { Start-Sleep -Seconds 12 }
             }
-        }
-        if (-not $cfOk) {
-            if ($currentTunnel) {
-                Write-WLog "tunnel DOWN (current=$currentTunnel, 5 consecutive probes failed), restarting cloudflared"
-            } else {
-                Write-WLog "tunnel not set, starting cloudflared"
-            }
-            $newUrl = Start-Cloudflared
-            if ($newUrl) {
-                $currentTunnel = $newUrl
-                Publish-TunnelUrl -Url $newUrl
-                # 발급 직후 propagation 대기
-                Start-Sleep -Seconds 10
-            } else {
-                Write-WLog "cloudflared restart failed; sleep 60s and retry"
+            if (-not $tunnelOk) {
+                Write-WLog "tunnel DOWN ($TunnelUrl, 5 consecutive probes failed), restarting ngrok"
+                if (-not (Start-Ngrok)) { Write-WLog "ngrok restart failed; sleep 60s and retry" }
             }
         }
     } catch {

@@ -148,14 +148,19 @@ function Stop-AllCloudflared {
 
 function Invoke-HealthPrewarm {
     # 새 uvicorn 기동 직후 /health(slow path)를 한 번 호출해 캐시를 채워둠.
-    # FastAPI의 sync def → anyio threadpool로 위임돼서 이벤트루프 안 막고 캐시만 채움.
     # 사용자 첫 요청은 cache hit으로 즉답.
+    #
+    # 분리 프로세스로 dispatch한다 (fire-and-forget). 예전엔 watchdog 메인 루프에서
+    # -TimeoutSec 300으로 동기 호출했는데, /health가 콜드스타트로 안 끝나면
+    # 루프 전체가 최대 5분 freeze → 그 사이 터널이 죽어도 감지·재기동을 못 했다.
     try {
-        $r = Invoke-WebRequest -Uri "http://127.0.0.1:8000/health" `
-            -UseBasicParsing -TimeoutSec 300
-        Write-WLog "  /health prewarm OK ($($r.StatusCode), bytes=$($r.Content.Length))"
+        Start-Process -FilePath "powershell.exe" -WindowStyle Hidden -ArgumentList @(
+            "-NoProfile", "-WindowStyle", "Hidden", "-Command",
+            "try { Invoke-WebRequest -Uri 'http://127.0.0.1:8000/health' -UseBasicParsing -TimeoutSec 300 | Out-Null } catch {}"
+        ) | Out-Null
+        Write-WLog "  /health prewarm dispatched (background, non-blocking)"
     } catch {
-        Write-WLog "  /health prewarm failed: $_"
+        Write-WLog "  /health prewarm dispatch failed: $_"
     }
 }
 
@@ -202,7 +207,11 @@ function Start-Cloudflared {
         $bad = $false
         for ($i = 0; $i -lt 60; $i++) {
             if (Test-Path $cfErr) {
-                $m = Select-String -Path $cfErr -Pattern "https://[a-z0-9-]+\.trycloudflare\.com" -ErrorAction SilentlyContinue | Select-Object -First 1
+                # quick tunnel 서브도메인은 항상 하이픈으로 이어진 4단어
+                # (예: weapon-tongue-plan-completing). 예전 정규식 "[a-z0-9-]+"는
+                # cloudflared stderr 에러 줄의 "api.trycloudflare.com"까지 잡아
+                # 깨진 URL을 publish했다 → 하이픈 2개 이상(3단어+) 요구로 한정.
+                $m = Select-String -Path $cfErr -Pattern "https://[a-z0-9]+(?:-[a-z0-9]+){2,}\.trycloudflare\.com" -ErrorAction SilentlyContinue | Select-Object -First 1
                 if ($m) { $url = $m.Matches[0].Value; break }
                 $err = Select-String -Path $cfErr -Pattern "Error unmarshaling QuickTunnel response" -ErrorAction SilentlyContinue | Select-Object -First 1
                 if ($err) { $bad = $true; break }

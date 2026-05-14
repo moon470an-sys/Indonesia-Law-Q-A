@@ -5,6 +5,10 @@
 $ErrorActionPreference = "Continue"
 
 $PagesBase  = "https://moon470an-sys.github.io/Indonesia-Law-Q-A"
+# ngrok 무료 티어는 브라우저류 User-Agent에 경고 인터스티셜(HTML)을 끼워넣는다.
+# PowerShell Invoke-WebRequest의 기본 UA도 "Mozilla/5.0"을 포함해 걸릴 수 있으므로
+# 외부 터널 호출에는 이 헤더를 붙여 우회한다 (없으면 JSON 대신 HTML 받아 false fail).
+$NgrokHdr = @{ "ngrok-skip-browser-warning" = "true" }
 $Pass = @()
 $Fail = @()
 
@@ -25,7 +29,7 @@ function Step($label, [scriptblock]$body) {
 Write-Host "=== Indonesia Law RAG stack verification ===" -ForegroundColor Cyan
 Write-Host ""
 
-# 1. Watchdog + uvicorn + cloudflared processes
+# 1. Watchdog + uvicorn + ngrok processes
 Step "watchdog scheduled task RUNNING" {
     $t = Get-ScheduledTask -TaskName "Indonesia Law RAG" -ErrorAction Stop
     $info = $t | Get-ScheduledTaskInfo
@@ -38,8 +42,8 @@ Step "uvicorn listening on 127.0.0.1:8000" {
     "(pid=$($c.OwningProcess))"
 }
 
-Step "cloudflared process alive" {
-    $p = Get-Process -Name cloudflared -ErrorAction Stop
+Step "ngrok process alive" {
+    $p = Get-Process -Name ngrok -ErrorAction Stop
     "(pid=$($p.Id), mem=$([Math]::Round($p.WorkingSet64/1MB,1))MB)"
 }
 
@@ -75,13 +79,13 @@ Step "Pages tunnel.json fetch (timeout 15s)" {
 # 4. Fetch tunnel URL from outside
 if ($script:_pagesTunnel) {
     Step "tunnel /healthz from outside (timeout 15s)" {
-        $r = Invoke-WebRequest -Uri "$($script:_pagesTunnel)/healthz" -UseBasicParsing -TimeoutSec 15
+        $r = Invoke-WebRequest -Uri "$($script:_pagesTunnel)/healthz" -Headers $NgrokHdr -UseBasicParsing -TimeoutSec 15
         if ($r.StatusCode -ne 200) { throw "status=$($r.StatusCode)" }
         "(200)"
     }
 
     Step "tunnel /health quick from outside (cache HIT, count>0)" {
-        $r = Invoke-WebRequest -Uri "$($script:_pagesTunnel)/health?quick=1" -UseBasicParsing -TimeoutSec 30
+        $r = Invoke-WebRequest -Uri "$($script:_pagesTunnel)/health?quick=1" -Headers $NgrokHdr -UseBasicParsing -TimeoutSec 30
         $d = $r.Content | ConvertFrom-Json
         if (-not $d.ok) { throw "ok=false" }
         if ($d.warming) { throw "still warming through tunnel" }
@@ -103,7 +107,7 @@ Step "local /healthz re-check after 15s" {
 
 if ($script:_pagesTunnel) {
     Step "tunnel /healthz re-check after 15s" {
-        $r = Invoke-WebRequest -Uri "$($script:_pagesTunnel)/healthz" -UseBasicParsing -TimeoutSec 15
+        $r = Invoke-WebRequest -Uri "$($script:_pagesTunnel)/healthz" -Headers $NgrokHdr -UseBasicParsing -TimeoutSec 15
         if ($r.StatusCode -ne 200) { throw "status=$($r.StatusCode)" }
         "(200)"
     }

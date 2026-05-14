@@ -58,7 +58,7 @@ EMBEDDING_DIM = 1024
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
 CLAUDE_HAIKU = os.getenv("CLAUDE_HAIKU", "claude-haiku-4-5-20251001")
 
-TOP_K_DEFAULT = 8
+TOP_K_DEFAULT = 12
 # 메인 답변용 user_message에 인라인되는 청크 본문 길이 cap.
 # 청크 전문이 필요하면 모델이 fetch_article_chunks로 끌어옴 → 매 호출 입력 토큰 절감.
 CONTEXT_CHUNK_TEXT_MAX = 1500
@@ -914,7 +914,7 @@ TOOLS = [
     },
 ]
 
-MAX_TOOL_ITERATIONS = 3
+MAX_TOOL_ITERATIONS = 5
 
 # ===== Phase 7: Conversational Memory =====
 # In-memory conversation store. server restart 시 history 소실 (단순화).
@@ -2303,6 +2303,41 @@ def query_stream(req: QueryRequest, x_api_token: str | None = Header(default=Non
                 messages_loop.append({"role": "user", "content": tool_results_payload})
                 # 다음 turn에서 thinking_announced 초기화 — 새 thinking 알림 가능
                 thinking_announced = False
+            else:
+                # for-else: loop가 break 없이 모든 iter 소진 → 마지막 iter도 stop_reason=tool_use.
+                # 모델은 더 tool 부르고 싶었지만 한도 도달. tools 제거하고 최종 합성 1회 강제 호출.
+                # 이 단계 없으면 사용자에겐 announce 텍스트만 흘러가 "한 줄 답변" 버그 발생.
+                logger.info("agent loop hit MAX_TOOL_ITERATIONS (%d), forcing final synthesis without tools", MAX_TOOL_ITERATIONS)
+                yield _sse("iter_limit_synthesis", {"message": "조사 단계 마무리 — 최종 답변 합성 중", "iterations": iter_count})
+                # 합성용 prompt: 모델에게 더 이상 tool 못 쓰니 가진 자료로 답하라고 명시.
+                messages_loop.append({
+                    "role": "user",
+                    "content": "추가 도구 호출 없이, 지금까지 확보된 [참고 문서]와 tool_result만 근거로 한국어 최종 답변을 작성하세요. 인용 형식(파일명, 페이지, 조항)은 system prompt의 규정 그대로.",
+                })
+                if thinking_announced:
+                    yield _sse("thinking", {"status": "ended"})
+                    thinking_announced = False
+                with client.messages.stream(
+                    model=CLAUDE_MODEL,
+                    system=SYSTEM_PROMPT_CACHED,
+                    messages=messages_loop,
+                    # tools 의도적으로 누락 → 최종 텍스트 응답 강제.
+                    max_tokens=MAX_ANSWER_TOKENS,
+                ) as fstream:
+                    for event in fstream:
+                        et = getattr(event, "type", "")
+                        if et == "content_block_delta":
+                            delta = getattr(event, "delta", None)
+                            dt = getattr(delta, "type", "") if delta else ""
+                            if dt == "text_delta":
+                                accumulated_answer.append(delta.text)
+                                yield _sse("token", {"text": delta.text})
+                    final_synth = fstream.get_final_message()
+                    usage = final_synth.usage
+                    for k in ("input_tokens", "output_tokens",
+                              "cache_creation_input_tokens", "cache_read_input_tokens"):
+                        v = getattr(usage, k, None) or 0
+                        cache_stats[k] = (cache_stats.get(k) or 0) + v
         except RateLimitError as exc:
             # SDK 자동 재시도(max_retries=4)도 못 뚫은 ITPM 한도. 사용자에게 명확히 안내.
             retry_after = None
@@ -2412,6 +2447,33 @@ def query_stream(req: QueryRequest, x_api_token: str | None = Header(default=Non
                             "content": result_str,
                         })
                     messages_retry.append({"role": "user", "content": tr_payload})
+                else:
+                    # retry agent loop도 iter 한도 도달 → tools 빼고 최종 합성 강제.
+                    logger.info("retry agent loop hit MAX_TOOL_ITERATIONS, forcing synthesis")
+                    yield _sse("iter_limit_synthesis", {"message": "재시도 마무리 — 최종 답변 합성 중", "iterations": iter_count_retry, "phase": "retry"})
+                    messages_retry.append({
+                        "role": "user",
+                        "content": "추가 도구 호출 없이, 지금까지 확보된 자료만 근거로 한국어 최종 답변을 작성하세요.",
+                    })
+                    with client.messages.stream(
+                        model=CLAUDE_MODEL,
+                        system=SYSTEM_PROMPT_CACHED,
+                        messages=messages_retry,
+                        max_tokens=MAX_ANSWER_TOKENS,
+                    ) as fstream2:
+                        for event in fstream2:
+                            et = getattr(event, "type", "")
+                            if et == "content_block_delta":
+                                delta = getattr(event, "delta", None)
+                                if delta and getattr(delta, "type", "") == "text_delta":
+                                    accumulated_retry.append(delta.text)
+                                    yield _sse("token", {"text": delta.text})
+                        final_synth2 = fstream2.get_final_message()
+                        us2 = final_synth2.usage
+                        for k in ("input_tokens", "output_tokens",
+                                  "cache_creation_input_tokens", "cache_read_input_tokens"):
+                            v = getattr(us2, k, None) or 0
+                            cache_stats[k] = (cache_stats.get(k) or 0) + v
                 answer_retry = "".join(accumulated_retry).strip()
                 if answer_retry:
                     answer_full = answer_retry
